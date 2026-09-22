@@ -52,8 +52,11 @@ if not DEBUG and len(SECRET_KEY) < 50:
     raise ImproperlyConfigured('SECRET_KEY must be at least 50 characters for production security.')
 
 JWT_SIGNING_KEY = os.getenv('JWT_SIGNING_KEY')
-if not JWT_SIGNING_KEY or len(JWT_SIGNING_KEY.encode('utf-8')) < 32:
-    raise ImproperlyConfigured('JWT_SIGNING_KEY must be provided through the environment and be at least 32 bytes long.')
+if not DEBUG:  # Only enforce the strict requirement in production
+    if not JWT_SIGNING_KEY or len(JWT_SIGNING_KEY.encode('utf-8')) < 32:
+        raise ImproperlyConfigured('JWT_SIGNING_KEY must be provided through the environment and be at least 32 bytes long.')
+else:  # DEBUG mode: provide a dummy value if not set (for collectstatic during build)
+    JWT_SIGNING_KEY = JWT_SIGNING_KEY or 'dummy-development-jwt-key-32-bytes-long-enough'
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=int(os.getenv('JWT_ACCESS_TOKEN_LIFETIME_MINUTES', 30))),
