@@ -1,0 +1,48 @@
+# Cafsule backend runtime dependencies
+# Generated from the actual project configuration and installed environment.
+# This project is a Django 5 backend using DRF, JWT auth, PostGIS, CORS, social auth,
+# Celery, Pillow image support, Redis-aware Celery config, and Python environment variables.
+
+# Core Django / runtime
+Django==5.0.6
+python-dotenv==1.0.1
+
+# Database / PostgreSQL / PostGIS
+psycopg2-binary==2.9.9
+psycopg[binary]==3.2.1
+
+dj-database-url==2.2.0
+whitenoise==6.8.2
+
+# Django REST API
+# DRF is required by all API views and serializers.
+djangorestframework==3.15.1
+
+# Authentication / authorization
+# JWT authentication is configured in main/settings.py through DRF SimpleJWT.
+djangorestframework-simplejwt==5.3.1
+
+# Social / OAuth login
+# Middleware and settings reference social_django and SOCIAL_AUTH_GOOGLE_OAUTH2_*.
+social-auth-app-django==5.4.3
+
+# Filtering / query support
+# pharmacy/filters.py imports django_filters directly.
+django-filter==24.2
+
+# CORS
+# main/settings.py enables corsheaders middleware and configured origins.
+django-cors-headers==4.3.1
+
+# Background tasks
+# Celery is configured in main/celery.py and main/settings.py.
+celery==5.4.0
+redis==5.0.3
+
+# Image support
+# PharmacyBrand includes ImageField; Django's ImageField requires Pillow.
+Pillow==11.3.0
+
+# Production WSGI server for Docker/Cloud Run readiness
+# The container environment runs Django through Gunicorn.
+gunicorn==23.0.0

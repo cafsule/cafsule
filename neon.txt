@@ -1,0 +1,1 @@
+postgresql://neondb_owner:npg_odnzg9pX1qUu@ep-autumn-block-b49dlm4v-pooler.c-6.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require

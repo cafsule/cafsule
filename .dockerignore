@@ -1,0 +1,33 @@
+# Python cache and virtualenvs
+.venv
+venv
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Git and editor metadata
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+
+# OS and runtime artifacts
+.DS_Store
+*.log
+coverage/
+.pytest_cache/
+
+# Build and database artifacts
+*.sqlite3
+media/
+staticfiles/
+node_modules/
+
+# Docker local data
+volumes/
