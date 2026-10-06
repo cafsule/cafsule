@@ -88,7 +88,7 @@ Normalize Nigerian phone input in the UI if helpful, but send an E.164 value suc
 | `POST /api/auth/password/reset/confirm/` | `token`, `new_password`, `new_password_confirm`. |
 | `POST /api/auth/otp/request/` | `email`, `otp_type`, optional `send_via` (`EMAIL`, `SMS`, `BOTH`). OTP types: `EMAIL_VERIFICATION`, `PASSWORD_RESET`, `LOGIN`, `PHONE_VERIFICATION`, `TWO_FACTOR`. |
 | `POST /api/auth/otp/verify/` | `email`, six-character `otp_code`, `otp_type`. Email-verification and login OTP flows can return JWT tokens; password-reset returns `reset_token` for the confirm endpoint. |
-| `POST /api/auth/oauth/` | `provider` (`GOOGLE`, `FACEBOOK`, `APPLE`), `provider_user_id`, optional `email`, `first_name`, `last_name`. This endpoint currently trusts provider data supplied by the frontend; do not present it as a hardened OAuth implementation. |
+| `POST /api/auth/oauth/` | Google only: send `provider: "GOOGLE"` and the signed Google `id_token`. The backend verifies the token and derives the user ID, email, and name from its verified claims. Facebook and Apple are rejected until server-side token verification is implemented for those providers. |
 
 ## Pharmacy APIs
 

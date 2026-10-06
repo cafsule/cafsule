@@ -143,7 +143,7 @@ class SaleCompletionService:
     
     @staticmethod
     @transaction.atomic
-    def complete_sale(sale, user):
+    def complete_sale(sale, user, *, payment_status=None, amount_paid=None):
         """
         Complete a sale atomically.
         
@@ -167,10 +167,49 @@ class SaleCompletionService:
         # Validate sale can be completed
         SaleCompletionService.validate_sale_completable(sale)
         
-        # Validate all sale items
-        sale_items = sale.items.all()
+        # Validate all sale items and derive totals from their persisted,
+        # server-priced quantity and unit price. Never trust cached line_total.
+        sale_items = list(sale.items.all())
+        if not sale_items:
+            raise ValueError("Sale has no items")
         for sale_item in sale_items:
             SaleCompletionService.validate_sale_item(sale_item)
+
+        subtotal = sum(
+            (Decimal(item.quantity) * item.unit_price for item in sale_items),
+            Decimal('0.00'),
+        )
+        line_discounts = sum((item.line_discount for item in sale_items), Decimal('0.00'))
+        total = subtotal - line_discounts - sale.discount + sale.tax
+        if total < Decimal('0.00'):
+            raise ValueError("Sale discounts cannot exceed the pre-tax subtotal")
+        for item in sale_items:
+            authoritative_line_total = (Decimal(item.quantity) * item.unit_price) - item.line_discount
+            if authoritative_line_total < Decimal('0.00'):
+                raise ValueError('A line discount cannot exceed its line subtotal.')
+            if item.line_total != authoritative_line_total:
+                item.line_total = authoritative_line_total
+                item.save(update_fields=['line_total'])
+        if amount_paid is not None:
+            sale.amount_paid = amount_paid
+        elif payment_status == 'PAID':
+            # Preserve the API's explicit full-payment action while recording
+            # the corresponding actual amount in the authoritative sale row.
+            sale.amount_paid = total
+        if sale.amount_paid < Decimal('0.00') or sale.amount_paid > total:
+            raise ValueError('Amount paid must be between zero and the sale total.')
+
+        derived_payment_status = (
+            'PAID' if sale.amount_paid == total else
+            'PARTIAL' if sale.amount_paid > Decimal('0.00') else
+            'PENDING'
+        )
+        if payment_status and payment_status != derived_payment_status:
+            raise ValueError('Payment status does not match the amount paid.')
+        sale.payment_status = derived_payment_status
+        sale.subtotal = subtotal
+        sale.total = total
+        sale.save(update_fields=['subtotal', 'total', 'amount_paid', 'payment_status', 'updated_at'])
         
         # Process each sale item: allocate batches and reduce stock
         for sale_item in sale_items:

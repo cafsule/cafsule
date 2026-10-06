@@ -10,9 +10,11 @@ from django.core.mail import send_mail
 from django.conf import settings
 from django.urls import reverse
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 import logging
 
 from .models import User, EmailVerificationToken, PasswordResetToken, UserActivityLog
+from pharmacy.models import PharmacyBrand, PharmacyVerificationHistory
 from .serializers import (
     UserSerializer, RegisterSerializer, LoginSerializer,
     EmailVerificationSerializer, ResendVerificationSerializer,
@@ -22,7 +24,7 @@ from .serializers import (
     UserApprovalSerializer, PendingUsersSerializer, SocialAuthSerializer
 )
 from .tokens import generate_email_verification_token, generate_password_reset_token, generate_otp, verify_otp
-from .permissions import IsOwnerOrReadOnly, IsAuthenticatedAndActive, IsPharmacyOwner
+from .permissions import IsOwnerOrReadOnly, IsAuthenticatedAndActive, IsPharmacyOwner, IsAdminUser
 from .tasks import (
     send_otp_email,
     send_otp_sms,
@@ -141,12 +143,7 @@ class LoginView(APIView):
 
 
 class SocialAuthView(APIView):
-    """Handle social/OAuth login and registration.
-
-    NOTE: This implements a basic flow that trusts the frontend/provider to
-    have already validated the provider token. In a real integration you
-    should verify provider tokens server-side with the provider's API.
-    """
+    """Handle Google login only after the serializer verifies its ID token."""
 
     permission_classes = [permissions.AllowAny]
 
@@ -160,7 +157,7 @@ class SocialAuthView(APIView):
         first_name = serializer.validated_data.get('first_name', '')
         last_name = serializer.validated_data.get('last_name', '')
 
-        # Try to find an existing user linked to this provider
+        # Identity fields here come only from the verified Google ID token.
         user = None
         try:
             user = User.objects.get(oauth_provider=provider, oauth_provider_user_id=provider_user_id)
@@ -172,9 +169,9 @@ class SocialAuthView(APIView):
                     user.oauth_provider = provider
                     user.oauth_provider_user_id = provider_user_id
                     user.is_verified = True
-                    user.is_active = True
-                    user.account_status = 'ACTIVE'
-                    user.save(update_fields=['oauth_provider', 'oauth_provider_user_id', 'is_verified', 'is_active', 'account_status', 'updated_at'])
+                    if user.account_status == 'UNVERIFIED':
+                        user.account_status = 'ACTIVE'
+                    user.save(update_fields=['oauth_provider', 'oauth_provider_user_id', 'is_verified', 'account_status', 'updated_at'])
                 except User.DoesNotExist:
                     user = None
 
@@ -197,6 +194,12 @@ class SocialAuthView(APIView):
             user.is_active = True
             user.account_status = 'ACTIVE'
             user.save()
+
+        if not user.is_active or user.account_status in {'SUSPENDED', 'DEACTIVATED', 'REJECTED'}:
+            return Response(
+                {'detail': 'This account is inactive or unavailable.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         # Generate tokens
         try:
@@ -309,6 +312,118 @@ class TokenRefreshView(JWTTokenRefreshView):
     
     def get_user_agent(self, request):
         return request.META.get('HTTP_USER_AGENT', '')
+
+class PlatformActivityListView(generics.ListAPIView):
+    """Return the real platform activity records that exist in the backend."""
+
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
+
+    def get_queryset(self):
+        return []
+
+    def get(self, request, *args, **kwargs):
+        search = (request.query_params.get('search') or '').strip()
+        action = (request.query_params.get('action') or '').strip()
+        resource_type = (request.query_params.get('resource_type') or '').strip()
+        start_date = (request.query_params.get('start_date') or '').strip()
+        end_date = (request.query_params.get('end_date') or '').strip()
+
+        activity = []
+
+        user_logs = UserActivityLog.objects.select_related('user').all()
+        if search:
+            user_logs = user_logs.filter(
+                Q(user__email__icontains=search)
+                | Q(user__first_name__icontains=search)
+                | Q(user__last_name__icontains=search)
+                | Q(action__icontains=search)
+            )
+        if action:
+            user_logs = user_logs.filter(action=action)
+        if start_date:
+            user_logs = user_logs.filter(created_at__date__gte=start_date)
+        if end_date:
+            user_logs = user_logs.filter(created_at__date__lte=end_date)
+
+        for log in user_logs:
+            actor = log.user
+            event = {
+                'id': f'user-activity:{log.pk}',
+                'event_type': 'USER_ACTIVITY',
+                'timestamp': log.created_at.isoformat(),
+                'action': log.get_action_display(),
+                'resource_type': 'USER',
+                'resource_id': str(log.user_id) if log.user_id else None,
+                'resource_name': actor.get_full_name() if actor else 'System',
+                'actor': {
+                    'id': str(actor.id) if actor else None,
+                    'name': actor.get_full_name() if actor else 'System',
+                    'email': actor.email if actor else None,
+                    'role': actor.role if actor else None,
+                },
+                'pharmacy': None,
+                'previous_state': None,
+                'new_state': None,
+                'reason': None,
+                'details': log.details or {},
+                'status': 'SUCCESS',
+                'result': log.get_action_display(),
+            }
+            activity.append(event)
+
+        pharmacy_history = PharmacyVerificationHistory.objects.select_related('pharmacy_brand', 'performed_by').all()
+        if search:
+            pharmacy_history = pharmacy_history.filter(
+                Q(performed_by__email__icontains=search)
+                | Q(performed_by__first_name__icontains=search)
+                | Q(performed_by__last_name__icontains=search)
+                | Q(pharmacy_brand__brand_name__icontains=search)
+                | Q(pharmacy_brand__legal_name__icontains=search)
+                | Q(action__icontains=search)
+            )
+        if action:
+            pharmacy_history = pharmacy_history.filter(action=action)
+        if resource_type:
+            pharmacy_history = pharmacy_history.filter(pharmacy_brand__isnull=False)
+        if start_date:
+            pharmacy_history = pharmacy_history.filter(created_at__date__gte=start_date)
+        if end_date:
+            pharmacy_history = pharmacy_history.filter(created_at__date__lte=end_date)
+
+        for history in pharmacy_history:
+            actor = history.performed_by
+            event = {
+                'id': f'pharmacy-verification:{history.pk}',
+                'event_type': 'PHARMACY_VERIFICATION',
+                'timestamp': history.created_at.isoformat(),
+                'action': history.get_action_display(),
+                'resource_type': 'PHARMACY',
+                'resource_id': str(history.pharmacy_brand_id),
+                'resource_name': history.pharmacy_brand.brand_name if history.pharmacy_brand else 'Pharmacy',
+                'actor': {
+                    'id': str(actor.id) if actor else None,
+                    'name': actor.get_full_name() if actor else 'System',
+                    'email': actor.email if actor else None,
+                    'role': actor.role if actor else None,
+                },
+                'pharmacy': {
+                    'id': str(history.pharmacy_brand_id),
+                    'brand_name': history.pharmacy_brand.brand_name if history.pharmacy_brand else None,
+                    'legal_name': history.pharmacy_brand.legal_name if history.pharmacy_brand else None,
+                    'pharmacy_id': history.pharmacy_brand.pharmacy_id if history.pharmacy_brand else None,
+                },
+                'previous_state': history.previous_status,
+                'new_state': history.new_status,
+                'reason': history.reason or None,
+                'details': {'notes': history.notes} if history.notes else {},
+                'status': history.new_status,
+                'result': history.get_action_display(),
+            }
+            activity.append(event)
+
+        activity.sort(key=lambda entry: entry['timestamp'], reverse=True)
+        return Response(activity)
+
 
 class MeView(generics.RetrieveUpdateAPIView):
     """Get and update current user's profile"""
@@ -761,22 +876,73 @@ class OTPVerifyView(APIView):
         return request.META.get('HTTP_USER_AGENT', '')
 
 
+class PlatformUserListView(APIView):
+    """Platform-wide user listing for SUPER_ADMIN and PLATFORM_ADMIN."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in ('SUPER_ADMIN', 'PLATFORM_ADMIN'):
+            return Response({'detail': 'Forbidden'}, status=status.HTTP_403_FORBIDDEN)
+
+        queryset = User.objects.all().order_by('-date_joined')
+        search = (request.query_params.get('search') or '').strip()
+        role = request.query_params.get('role')
+        status_filter = request.query_params.get('status')
+        verified = request.query_params.get('verified')
+
+        if search:
+            queryset = queryset.filter(
+                Q(email__icontains=search)
+                | Q(first_name__icontains=search)
+                | Q(last_name__icontains=search)
+                | Q(phone_number__icontains=search)
+            )
+        if role:
+            queryset = queryset.filter(role=role)
+        if status_filter:
+            queryset = queryset.filter(account_status=status_filter)
+        if verified is not None:
+            verified_value = str(verified).lower() in {'1', 'true', 'yes', 'y'}
+            queryset = queryset.filter(is_verified=verified_value)
+
+        serializer = UserSerializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PlatformUserDetailView(APIView):
+    """Detailed platform user record for admin review."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, pk=None):
+        if request.user.role not in ('SUPER_ADMIN', 'PLATFORM_ADMIN'):
+            return Response({'detail': 'Forbidden'}, status=status.HTTP_403_FORBIDDEN)
+
+        user = get_object_or_404(User, pk=pk)
+        serializer = UserSerializer(user)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
 # ==================== PHARMACY OWNER APPROVAL VIEWS ====================
 
 class PendingUsersView(APIView):
-    """List pending users for pharmacy owner approval"""
+    """List pending users for approval across the platform."""
     
     permission_classes = [permissions.IsAuthenticated, IsPharmacyOwner]
     throttle_classes = [throttle.UserRateThrottle]
     
     def get(self, request):
-        # Get users that require approval
-        # For now, get all pending users (will be filtered by pharmacy brand later)
-        pending_users = User.objects.filter(
-            account_status='PENDING_APPROVAL',
-            role__in=['PHARMACY_MANAGER', 'PHARMACIST', 'PHARMACY_STAFF'],
-            is_approved=False
-        ).order_by('-date_joined')
+        if request.user.role in ['SUPER_ADMIN', 'PLATFORM_ADMIN']:
+            pending_users = User.objects.filter(
+                account_status='PENDING_APPROVAL',
+                role__in=['PHARMACY_MANAGER', 'PHARMACIST', 'PHARMACY_STAFF'],
+                is_approved=False
+            ).order_by('-date_joined')
+        else:
+            pending_users = User.objects.filter(
+                account_status='PENDING_APPROVAL',
+                role__in=['PHARMACY_MANAGER', 'PHARMACIST', 'PHARMACY_STAFF'],
+                is_approved=False
+            ).order_by('-date_joined')
         
         serializer = PendingUsersSerializer(pending_users, many=True)
         return Response({
@@ -869,14 +1035,11 @@ class ApproveUserView(APIView):
         return request.META.get('HTTP_USER_AGENT', '')
 
 class MyPharmacyStaffView(APIView):
-    """Get all staff under this pharmacy owner"""
+    """Get all approved staff across the platform for owners and admins."""
     
     permission_classes = [permissions.IsAuthenticated, IsPharmacyOwner]
     
     def get(self, request):
-        # Get all approved staff under this owner
-        # For now, get all approved pharmacy staff
-        # Will be filtered by pharmacy_brand later
         staff = User.objects.filter(
             role__in=['PHARMACY_MANAGER', 'PHARMACIST', 'PHARMACY_STAFF'],
             is_approved=True,
@@ -891,7 +1054,7 @@ class MyPharmacyStaffView(APIView):
         }, status=status.HTTP_200_OK)
 
 class PendingApprovalCountView(APIView):
-    """Get count of pending approvals for pharmacy owner dashboard"""
+    """Get count of pending approvals for pharmacy owner or platform admin dashboard."""
     
     permission_classes = [permissions.IsAuthenticated, IsPharmacyOwner]
     

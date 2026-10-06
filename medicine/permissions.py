@@ -1,6 +1,4 @@
-"""
-Permission classes for medicine and inventory management.
-"""
+"""Permission classes for the global medicine catalog and inventory management."""
 
 from rest_framework.permissions import BasePermission
 from django.contrib.auth import get_user_model
@@ -9,35 +7,21 @@ User = get_user_model()
 
 
 class CanCreateMedicine(BasePermission):
-    """
-    Permission to create/modify pharmacy-specific medicines.
+    """Grant permission to create or manage global medicine catalog entries for pharmacy users."""
 
-    PHARMACY_OWNER and approved PHARMACY_MANAGER can create medicines for their own pharmacy.
-    SUPER_ADMIN and PLATFORM_ADMIN can manage any pharmacy's medicines.
-    """
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
 
-        if request.user.role in ('SUPER_ADMIN', 'PLATFORM_ADMIN'):
-            return True
-
-        if request.user.role in ('PHARMACY_OWNER', 'PHARMACY_MANAGER'):
-            return True
-
-        return False
+        return request.user.role in ('PHARMACY_OWNER', 'PHARMACY_MANAGER')
 
     def has_object_permission(self, request, view, obj):
-        if request.user.role in ('SUPER_ADMIN', 'PLATFORM_ADMIN'):
-            return True
-
-        if not obj or not getattr(obj, 'pharmacy', None):
+        pharmacy = getattr(obj, 'created_by_pharmacy', None)
+        if not pharmacy:
             return False
 
-        pharmacy = obj.pharmacy
-
         if request.user.role == 'PHARMACY_OWNER':
-            return pharmacy.owner == request.user
+            return pharmacy.owner_id == request.user.id
 
         if request.user.role == 'PHARMACY_MANAGER':
             from pharmacy.models import PharmacyMembership
@@ -50,10 +34,22 @@ class CanCreateMedicine(BasePermission):
         return False
 
 
+class CanCreateAdminMedicine(BasePermission):
+    """Platform admin-only medicine creation permission."""
+
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        return request.user.role in ('SUPER_ADMIN', 'PLATFORM_ADMIN')
+
+    def has_object_permission(self, request, view, obj):
+        return request.user.role in ('SUPER_ADMIN', 'PLATFORM_ADMIN')
+
+
 class CanViewMedicine(BasePermission):
-    """
-    Any authenticated user can view medicines.
-    """
+    """Authenticated users can view the global medicine catalog."""
+
     def has_permission(self, request, view):
         return bool(request.user and request.user.is_authenticated)
 

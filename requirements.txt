@@ -5,6 +5,7 @@
 
 # Core Django / runtime
 Django==5.0.6
+django-jazzmin==3.0.5
 python-dotenv==1.0.1
 
 # Database / PostgreSQL / PostGIS
@@ -21,6 +22,7 @@ djangorestframework==3.15.1
 # Authentication / authorization
 # JWT authentication is configured in main/settings.py through DRF SimpleJWT.
 djangorestframework-simplejwt==5.3.1
+google-auth[requests]==2.59.1
 
 # Social / OAuth login
 # Middleware and settings reference social_django and SOCIAL_AUTH_GOOGLE_OAUTH2_*.

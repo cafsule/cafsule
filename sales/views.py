@@ -313,15 +313,14 @@ class SaleViewSet(viewsets.ModelViewSet):
         amount_paid = serializer.validated_data.get('amount_paid')
         
         try:
-            # Complete the sale (handles all business logic atomically)
-            sale = SaleCompletionService.complete_sale(sale, request.user)
-            
-            # Update payment info if provided
-            if payment_status:
-                sale.payment_status = payment_status
-            if amount_paid is not None:
-                sale.amount_paid = amount_paid
-            sale.save()
+            # Completion derives and validates payment totals in the same
+            # transaction as stock, sale, and customer-ledger persistence.
+            sale = SaleCompletionService.complete_sale(
+                sale,
+                request.user,
+                payment_status=payment_status,
+                amount_paid=amount_paid,
+            )
             
             # Return updated sale
             return_serializer = SaleDetailSerializer(sale, context={'request': request})
@@ -421,9 +420,10 @@ class SaleViewSet(viewsets.ModelViewSet):
             
             # Recalculate sale totals
             items = sale.items.all()
-            subtotal = sum(i.line_total for i in items)
+            subtotal = sum((i.quantity * i.unit_price for i in items), Decimal('0.00'))
+            line_discounts = sum((i.line_discount for i in items), Decimal('0.00'))
             sale.subtotal = subtotal
-            sale.total = subtotal - sale.discount + sale.tax
+            sale.total = subtotal - line_discounts - sale.discount + sale.tax
             sale.save(update_fields=['subtotal', 'total', 'updated_at'])
             
             # Return created item

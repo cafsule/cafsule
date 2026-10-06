@@ -73,12 +73,16 @@ class IsPharmacyStaff(permissions.BasePermission):
             ]
         )
 class IsPharmacyOwner(permissions.BasePermission):
-    """Permission check for pharmacy owners"""
+    """Permission check for pharmacy owners and platform administrators."""
     
     def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+
+        if request.user.role in ['SUPER_ADMIN', 'PLATFORM_ADMIN']:
+            return request.user.is_active and request.user.account_status == 'ACTIVE'
+
         return (
-            request.user and
-            request.user.is_authenticated and
             request.user.role == 'PHARMACY_OWNER' and
             request.user.is_approved and
             request.user.is_active and

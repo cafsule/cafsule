@@ -1,7 +1,7 @@
 from django.urls import reverse
 from rest_framework.test import APITestCase, APIClient
 from django.contrib.auth import get_user_model
-from pharmacy.models import PharmacyBrand, PharmacyMembership
+from pharmacy.models import PharmacyBrand, PharmacyBrandImage, PharmacyMembership
 
 User = get_user_model()
 
@@ -12,6 +12,100 @@ class PharmacyViewsTests(APITestCase):
         self.owner = User.objects.create_user(email='owner@example.com', password='Pass1234', role='PHARMACY_OWNER', account_status='ACTIVE', is_verified=True, is_approved=True)
         self.staff = User.objects.create_user(email='staff@example.com', password='Pass1234', role='PHARMACY_STAFF', account_status='ACTIVE', is_verified=True)
         self.admin = User.objects.create_user(email='admin@example.com', password='Pass1234', role='SUPER_ADMIN', account_status='ACTIVE', is_verified=True, is_approved=True)
+
+    def create_submittable_pharmacy(self, brand_name, registrations=None):
+        self.client.force_authenticate(self.owner)
+        payload = {
+            'legal_name': f'{brand_name} Ltd',
+            'brand_name': brand_name,
+            'business_email': 'owner@example.com',
+            'business_phone': '08031234567',
+            'address_line_1': '1 Main Street',
+            'city': 'Lagos',
+            'state': 'Lagos',
+            'location': {'type': 'Point', 'coordinates': [3.3792, 6.5244]},
+            **(registrations or {}),
+        }
+        response = self.client.post(reverse('pharmacybrand-list'), payload, format='json')
+        self.assertEqual(response.status_code, 201, response.json())
+        brand = PharmacyBrand.objects.get(pk=response.json()['id'])
+        for image_type in ('EXTERIOR', 'EXTERIOR', 'INTERIOR', 'INTERIOR'):
+            PharmacyBrandImage.objects.create(brand=brand, image_type=image_type)
+        return brand
+
+    def test_owner_can_submit_pharmacy_without_optional_registrations(self):
+        brand = self.create_submittable_pharmacy('Unregistered Pharmacy')
+
+        response = self.client.post(
+            reverse('pharmacybrand-submit-for-verification', args=[str(brand.id)]),
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        brand.refresh_from_db()
+        self.assertEqual(brand.verification_status, 'PENDING_VERIFICATION')
+
+    def test_owner_can_submit_pharmacy_with_existing_optional_registrations(self):
+        brand = self.create_submittable_pharmacy('Registered Pharmacy', {
+            'cac_registration_number': 'RC123456',
+            'pcn_premises_registration_number': 'PCN123456',
+            'pcn_license_number': 'LIC123456',
+            'pcn_issue_date': '2025-01-01',
+            'pcn_expiry_date': '2027-01-01',
+            'nafdac_registration_number': 'NAFDAC123456',
+            'nafdac_certificate_number': 'CERT123456',
+            'nafdac_expiry_date': '2027-01-01',
+        })
+
+        response = self.client.post(
+            reverse('pharmacybrand-submit-for-verification', args=[str(brand.id)]),
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        brand.refresh_from_db()
+        self.assertEqual(brand.cac_registration_number, 'RC123456')
+        self.assertEqual(brand.pcn_premises_registration_number, 'PCN123456')
+        self.assertEqual(brand.nafdac_registration_number, 'NAFDAC123456')
+        self.assertEqual(brand.verification_status, 'PENDING_VERIFICATION')
+
+    def test_owner_can_update_optional_registration_values(self):
+        brand = self.create_submittable_pharmacy('Updated Registration Pharmacy')
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.patch(
+            reverse('pharmacybrand-detail', args=[str(brand.id)]),
+            {
+                'cac_registration_number': 'RC654321',
+                'pcn_premises_registration_number': 'PCN654321',
+                'nafdac_registration_number': 'NAFDAC654321',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        brand.refresh_from_db()
+        self.assertEqual(brand.cac_registration_number, 'RC654321')
+        self.assertEqual(brand.pcn_premises_registration_number, 'PCN654321')
+        self.assertEqual(brand.nafdac_registration_number, 'NAFDAC654321')
+
+    def test_submit_still_requires_pharmacy_address_state_location_and_photos(self):
+        self.client.force_authenticate(self.owner)
+        brand = PharmacyBrand.objects.create(
+            owner=self.owner,
+            legal_name='Incomplete Pharmacy Ltd',
+            brand_name='Incomplete Pharmacy',
+        )
+
+        response = self.client.post(
+            reverse('pharmacybrand-submit-for-verification', args=[str(brand.id)]),
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        message = response.json()['detail']
+        for required in ('address', 'state', 'latitude and longitude', 'at least 2 exterior images', 'at least 2 interior images'):
+            self.assertIn(required, message)
 
     def test_owner_can_create_pharmacy(self):
         self.client.force_authenticate(self.owner)
@@ -313,6 +407,47 @@ class PharmacyViewsTests(APITestCase):
         self.assertEqual(r3.status_code, 200)
         membership.refresh_from_db()
         self.assertEqual(membership.status, 'APPROVED')
+
+    def test_platform_admin_has_platform_wide_user_and_membership_visibility(self):
+        brand = PharmacyBrand.objects.create(
+            owner=self.owner,
+            legal_name='Platform Visibility Ltd',
+            brand_name='Platform Visibility Pharmacy',
+            verification_status='VERIFIED',
+            pharmacy_id='CFS-PHARM-2222222222',
+        )
+        approved_member = User.objects.create_user(
+            email='member@example.com',
+            password='Pass1234',
+            role='PHARMACY_STAFF',
+            account_status='ACTIVE',
+            is_verified=True,
+            is_approved=True,
+        )
+        pending_member = User.objects.create_user(
+            email='pendingmember@example.com',
+            password='Pass1234',
+            role='PHARMACY_STAFF',
+            account_status='PENDING_APPROVAL',
+            is_verified=True,
+            is_approved=False,
+        )
+        PharmacyMembership.objects.create(user=approved_member, pharmacy=brand, role='PHARMACY_STAFF', status='APPROVED')
+
+        self.client.force_authenticate(self.admin)
+        pending_users = self.client.get(reverse('pending_users'))
+        self.assertEqual(pending_users.status_code, 200)
+        user_emails = {item['email'] for item in pending_users.json()['users']}
+        self.assertIn(pending_member.email, user_emails)
+
+        staff = self.client.get(reverse('my_staff'))
+        self.assertEqual(staff.status_code, 200)
+        staff_emails = {item['email'] for item in staff.json()['staff']}
+        self.assertIn(approved_member.email, staff_emails)
+
+        memberships = self.client.get(reverse('pharmacymembership-list'))
+        self.assertEqual(memberships.status_code, 200)
+        self.assertGreaterEqual(len(memberships.json()), 1)
 
     def test_pharmacy_id_is_generated_only_after_approval(self):
         from pharmacy.services import approve_pharmacy_brand

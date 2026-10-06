@@ -1,6 +1,8 @@
 # Python cache and virtualenvs
 .venv
+.venv*/
 venv
+mode/
 __pycache__/
 *.py[cod]
 *.pyo
@@ -26,6 +28,8 @@ coverage/
 # Build and database artifacts
 *.sqlite3
 media/
+pharmacy/brands/
+pharmacy/verification/
 staticfiles/
 node_modules/
 

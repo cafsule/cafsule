@@ -22,8 +22,8 @@ from django.contrib.auth import get_user_model
 from pharmacy.models import PharmacyBrand, PharmacyMembership
 from medicine.models import Medicine
 from inventory.models import PharmacyInventoryItem, InventoryBatch
-from sales.models import Sale, SaleItem, SaleItemBatchAllocation, Customer, StockMovement
-from sales.serializers import CustomerSerializer
+from sales.models import Sale, SaleItem, SaleItemBatchAllocation, Customer, CustomerLedgerEntry, StockMovement
+from sales.serializers import CustomerSerializer, SaleDetailSerializer
 from sales.services import SaleCompletionService, SaleVoidService, FEFOBatchAllocator, generate_receipt_number
 
 User = get_user_model()
@@ -459,6 +459,227 @@ class SaleCompletionTestCase(TransactionTestCase):
         self.batch.refresh_from_db()
         self.assertEqual(self.batch.quantity, initial_quantity - 20)
     
+    def test_credit_sale_ledger_uses_requested_payment_amount(self):
+        customer = Customer.objects.create(
+            pharmacy=self.pharmacy,
+            first_name='Credit',
+            customer_type='REGISTERED',
+        )
+        prior_sale = Sale.objects.create(
+            pharmacy=self.pharmacy,
+            customer=customer,
+            receipt_number=generate_receipt_number(self.pharmacy.id),
+            status='COMPLETED',
+            subtotal=Decimal('550.00'),
+            total=Decimal('550.00'),
+            payment_method='DEBT',
+            payment_status='PARTIAL',
+            amount_paid=Decimal('0.00'),
+            sold_by=self.owner,
+        )
+        CustomerLedgerEntry.objects.create(
+            customer=customer,
+            pharmacy=self.pharmacy,
+            sale=prior_sale,
+            entry_type='CREDIT_SALE',
+            amount=Decimal('550.00'),
+            balance_after=Decimal('550.00'),
+        )
+
+        for paid, expected_outstanding, expected_balance in (
+            (Decimal('0.00'), Decimal('1050.00'), Decimal('1600.00')),
+            (Decimal('500.00'), Decimal('550.00'), Decimal('1100.00')),
+            (Decimal('1050.00'), Decimal('0.00'), Decimal('550.00')),
+        ):
+            with self.subTest(paid=paid):
+                sale = Sale.objects.create(
+                    pharmacy=self.pharmacy,
+                    customer=customer,
+                    receipt_number=generate_receipt_number(self.pharmacy.id),
+                    status='DRAFT',
+                    subtotal=Decimal('1050.00'),
+                    total=Decimal('1050.00'),
+                    payment_method='DEBT',
+                    payment_status='PARTIAL',
+                    amount_paid=paid,
+                    created_by=self.owner,
+                )
+                SaleItem.objects.create(
+                    sale=sale,
+                    inventory_item=self.inventory,
+                    quantity=1,
+                    unit_price=Decimal('1050.00'),
+                    line_total=Decimal('1050.00'),
+                )
+
+                SaleCompletionService.complete_sale(sale, self.owner)
+
+                sale.refresh_from_db()
+                ledger_entry = sale.ledger_entries.get(entry_type='CREDIT_SALE') if expected_outstanding else None
+                self.assertEqual(sale.remaining_balance, expected_outstanding)
+                if ledger_entry:
+                    self.assertEqual(ledger_entry.amount, expected_outstanding)
+                    self.assertEqual(ledger_entry.balance_after, expected_balance)
+                self.assertEqual(customer.outstanding_balance, expected_balance)
+
+    def test_completion_recalculates_sale_total_from_persisted_items(self):
+        customer = Customer.objects.create(
+            pharmacy=self.pharmacy,
+            first_name='Walk-in',
+            customer_type='WALK_IN',
+        )
+        sale = Sale.objects.create(
+            pharmacy=self.pharmacy,
+            customer=customer,
+            receipt_number=generate_receipt_number(self.pharmacy.id),
+            status='DRAFT',
+            subtotal=Decimal('550.00'),
+            discount=Decimal('0.00'),
+            tax=Decimal('0.00'),
+            total=Decimal('550.00'),
+            payment_method='DEBT',
+            payment_status='PARTIAL',
+            amount_paid=Decimal('0.00'),
+            created_by=self.owner,
+        )
+        SaleItem.objects.create(
+            sale=sale,
+            inventory_item=self.inventory,
+            quantity=1,
+            unit_price=Decimal('1050.00'),
+            line_total=Decimal('1050.00'),
+        )
+
+        SaleCompletionService.complete_sale(sale, self.owner)
+
+        sale.refresh_from_db()
+        ledger_entry = sale.ledger_entries.get(entry_type='CREDIT_SALE')
+        self.assertEqual(sale.subtotal, Decimal('1050.00'))
+        self.assertEqual(sale.total, Decimal('1050.00'))
+        self.assertEqual(sale.amount_paid, Decimal('0.00'))
+        self.assertEqual(sale.remaining_balance, Decimal('1050.00'))
+        self.assertEqual(ledger_entry.amount, Decimal('1050.00'))
+        self.assertEqual(ledger_entry.balance_after, Decimal('1050.00'))
+
+    def test_explicit_full_payment_persists_total_as_amount_paid(self):
+        sale = Sale.objects.create(
+            pharmacy=self.pharmacy,
+            receipt_number=generate_receipt_number(self.pharmacy.id),
+            status='DRAFT',
+            created_by=self.owner,
+        )
+        SaleItem.objects.create(
+            sale=sale,
+            inventory_item=self.inventory,
+            quantity=1,
+            unit_price=Decimal('100.00'),
+            line_total=Decimal('100.00'),
+        )
+
+        SaleCompletionService.complete_sale(sale, self.owner, payment_status='PAID')
+
+        sale.refresh_from_db()
+        self.assertEqual(sale.total, Decimal('100.00'))
+        self.assertEqual(sale.amount_paid, Decimal('100.00'))
+        self.assertEqual(sale.remaining_balance, Decimal('0.00'))
+        self.assertEqual(sale.payment_status, 'PAID')
+        receipt = SaleDetailSerializer(sale).data
+        self.assertEqual(receipt['receipt_number'], sale.receipt_number)
+        self.assertEqual(receipt['total'], '100.00')
+        self.assertEqual(receipt['amount_paid'], '100.00')
+        self.assertEqual(receipt['remaining_balance'], '0.00')
+
+    def test_completion_recalculates_line_total_from_quantity_and_unit_price(self):
+        sale = Sale.objects.create(
+            pharmacy=self.pharmacy,
+            receipt_number=generate_receipt_number(self.pharmacy.id),
+            status='DRAFT',
+            created_by=self.owner,
+        )
+        item = SaleItem.objects.create(
+            sale=sale,
+            inventory_item=self.inventory,
+            quantity=2,
+            unit_price=Decimal('100.00'),
+            line_discount=Decimal('10.00'),
+            line_total=Decimal('1.00'),
+        )
+        SaleCompletionService.complete_sale(sale, self.owner, amount_paid=Decimal('190.00'))
+        sale.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(item.line_total, Decimal('190.00'))
+        self.assertEqual(sale.subtotal, Decimal('200.00'))
+        self.assertEqual(sale.total, Decimal('190.00'))
+
+    def test_discounted_registered_customer_sale_records_net_debt_on_receipt(self):
+        customer = Customer.objects.create(
+            pharmacy=self.pharmacy,
+            first_name='Registered',
+            customer_type='REGISTERED',
+        )
+        sale = Sale.objects.create(
+            pharmacy=self.pharmacy,
+            customer=customer,
+            receipt_number=generate_receipt_number(self.pharmacy.id),
+            status='DRAFT',
+            subtotal=Decimal('0.00'),
+            discount=Decimal('50.00'),
+            total=Decimal('0.00'),
+            payment_method='DEBT',
+            amount_paid=Decimal('800.00'),
+            created_by=self.owner,
+        )
+        SaleItem.objects.create(
+            sale=sale,
+            inventory_item=self.inventory,
+            quantity=1,
+            unit_price=Decimal('1050.00'),
+            line_total=Decimal('1050.00'),
+        )
+
+        SaleCompletionService.complete_sale(sale, self.owner)
+
+        sale.refresh_from_db()
+        receipt = SaleDetailSerializer(sale).data
+        self.assertEqual(sale.subtotal, Decimal('1050.00'))
+        self.assertEqual(sale.total, Decimal('1000.00'))
+        self.assertEqual(sale.amount_paid, Decimal('800.00'))
+        self.assertEqual(sale.remaining_balance, Decimal('200.00'))
+        self.assertEqual(sale.payment_status, 'PARTIAL')
+        self.assertEqual(receipt['total'], '1000.00')
+        self.assertEqual(receipt['amount_paid'], '800.00')
+        self.assertEqual(receipt['remaining_balance'], '200.00')
+        self.assertEqual(sale.ledger_entries.get(entry_type='CREDIT_SALE').amount, Decimal('200.00'))
+
+    def test_payment_cannot_exceed_recalculated_total_and_completion_rolls_back(self):
+        sale = Sale.objects.create(
+            pharmacy=self.pharmacy,
+            receipt_number=generate_receipt_number(self.pharmacy.id),
+            status='DRAFT',
+            created_by=self.owner,
+        )
+        SaleItem.objects.create(
+            sale=sale,
+            inventory_item=self.inventory,
+            quantity=1,
+            unit_price=Decimal('100.00'),
+            line_total=Decimal('100.00'),
+        )
+        initial_quantity = self.batch.quantity
+
+        with self.assertRaisesRegex(ValueError, 'between zero and the sale total'):
+            SaleCompletionService.complete_sale(
+                sale,
+                self.owner,
+                amount_paid=Decimal('100.01'),
+            )
+
+        sale.refresh_from_db()
+        self.batch.refresh_from_db()
+        self.assertEqual(sale.status, 'DRAFT')
+        self.assertEqual(sale.amount_paid, Decimal('0.00'))
+        self.assertEqual(self.batch.quantity, initial_quantity)
+
     def test_completing_sale_creates_stock_movement(self):
         """Test 10: Completing a sale creates SALE StockMovement"""
         sale = Sale.objects.create(

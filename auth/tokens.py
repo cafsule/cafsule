@@ -14,8 +14,6 @@ from .models import (
     OTPVerification,
     UserActivityLog,
 )
-from .serializers import OTPRequestSerializer, OTPVerifySerializer, UserSerializer
-
 User = get_user_model()
 
 def generate_email_verification_token(user):

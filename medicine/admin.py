@@ -4,14 +4,11 @@ from .models import Medicine
 
 @admin.register(Medicine)
 class MedicineAdmin(admin.ModelAdmin):
-    list_display = ('generic_name', 'brand_name', 'strength', 'dosage_form', 'route', 'pharmacy', 'created_at')
-    list_filter = ('pharmacy', 'dosage_form', 'route', 'created_at')
-    search_fields = ('generic_name', 'brand_name', 'strength', 'pharmacy__brand_name')
-    readonly_fields = ('id', 'created_at', 'updated_at', 'created_by')
+    list_display = ('generic_name', 'brand_name', 'strength', 'dosage_form', 'route', 'source', 'created_at')
+    list_filter = ('source', 'dosage_form', 'route', 'created_at')
+    search_fields = ('generic_name', 'brand_name', 'strength', 'created_by_pharmacy__brand_name')
+    readonly_fields = ('id', 'identity_key', 'created_at', 'updated_at', 'created_by', 'created_by_pharmacy', 'source')
     fieldsets = (
-        ('Pharmacy', {
-            'fields': ('pharmacy',)
-        }),
         ('Identification', {
             'fields': ('id', 'generic_name', 'brand_name', 'strength')
         }),
@@ -28,7 +25,7 @@ class MedicineAdmin(admin.ModelAdmin):
             'fields': ('description',)
         }),
         ('Audit', {
-            'fields': ('created_by', 'created_at', 'updated_at'),
+            'fields': ('source', 'verification_status', 'created_by', 'created_by_pharmacy', 'created_at', 'updated_at', 'identity_key'),
             'classes': ('collapse',)
         }),
     )

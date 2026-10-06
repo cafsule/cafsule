@@ -29,7 +29,11 @@ RUN groupadd --gid 1000 appgroup \
     && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/appuser appuser \
     && chown -R appuser:appgroup /app \
     && chmod -R u+rwX /app \
-    && DEBUG=1 SECRET_KEY=collectstatic-only-key python manage.py collectstatic --noinput --clear
+    && DEBUG=1 \
+       SECRET_KEY=collectstatic-only-key \
+       JWT_SIGNING_KEY=build-only-jwt-signing-key-not-used-at-runtime \
+       DB_NAME=build_only DB_USER=build_only DB_PASSWORD=build_only \
+       python manage.py collectstatic --noinput --clear
 
 USER appuser
 

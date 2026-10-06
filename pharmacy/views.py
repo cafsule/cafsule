@@ -260,11 +260,36 @@ class PharmacyMembershipViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in ('SUPER_ADMIN', 'PLATFORM_ADMIN'):
-            return self.queryset
+        qs = self.queryset
+
+        search = (self.request.query_params.get('search') or '').strip()
+        role = self.request.query_params.get('role')
+        status = self.request.query_params.get('status')
+        pharmacy_id = self.request.query_params.get('pharmacy')
+        user_id = self.request.query_params.get('user')
+
+        if self.request.user.role in ('SUPER_ADMIN', 'PLATFORM_ADMIN'):
+            if search:
+                qs = qs.filter(
+                    Q(user__email__icontains=search)
+                    | Q(user__first_name__icontains=search)
+                    | Q(user__last_name__icontains=search)
+                    | Q(pharmacy__brand_name__icontains=search)
+                    | Q(pharmacy__legal_name__icontains=search)
+                    | Q(role__icontains=search)
+                )
+            if role:
+                qs = qs.filter(role=role)
+            if status:
+                qs = qs.filter(status=status)
+            if pharmacy_id:
+                qs = qs.filter(pharmacy_id=pharmacy_id)
+            if user_id:
+                qs = qs.filter(user_id=user_id)
+            return qs
         if self.action in ('approve', 'reject', 'suspend'):
-            return self.queryset
-        return self.queryset.filter(Q(user=user) | Q(pharmacy__owner=user)).distinct()
+            return qs
+        return qs.filter(Q(user=user) | Q(pharmacy__owner=user)).distinct()
 
     def perform_create(self, serializer):
         # Use the serializer's create for validation then call service for business rules

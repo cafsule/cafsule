@@ -113,7 +113,7 @@ class PharmacyBrandUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PharmacyBrand
-        fields = ('legal_name', 'brand_name', 'description', 'business_email', 'business_phone', 'address_line_1', 'address_line_2', 'city', 'state', 'lga', 'postal_code', 'country', 'opnetime', 'closetime', 'pharmacy_type', 'years_in_operation', 'location')
+        fields = ('legal_name', 'brand_name', 'description', 'business_email', 'business_phone', 'address_line_1', 'address_line_2', 'city', 'state', 'lga', 'postal_code', 'country', 'opnetime', 'closetime', 'pharmacy_type', 'years_in_operation', 'cac_registration_number', 'cac_registration_type', 'pcn_premises_registration_number', 'pcn_license_number', 'pcn_issue_date', 'pcn_expiry_date', 'nafdac_registration_number', 'nafdac_certificate_number', 'nafdac_expiry_date', 'location')
 
     def validate(self, attrs):
         # If brand already verified and sensitive fields change, caller must trigger re-verification.
@@ -157,11 +157,12 @@ class PharmacyVerificationDocumentSerializer(serializers.ModelSerializer):
 class PharmacyMembershipSerializer(serializers.ModelSerializer):
     user = serializers.PrimaryKeyRelatedField(read_only=True, default=serializers.CurrentUserDefault())
     user_details = serializers.SerializerMethodField()
+    pharmacy_details = serializers.SerializerMethodField()
     pharmacy = serializers.PrimaryKeyRelatedField(queryset=PharmacyBrand.objects.all())
 
     class Meta:
         model = PharmacyMembership
-        fields = ('id', 'user', 'user_details', 'pharmacy', 'role', 'status', 'approved_by', 'approved_at', 'rejection_reason', 'created_at', 'updated_at')
+        fields = ('id', 'user', 'user_details', 'pharmacy', 'pharmacy_details', 'role', 'status', 'approved_by', 'approved_at', 'rejection_reason', 'created_at', 'updated_at')
         read_only_fields = ('id', 'status', 'approved_by', 'approved_at', 'rejection_reason', 'created_at', 'updated_at')
 
     def get_user_details(self, obj):
@@ -170,6 +171,14 @@ class PharmacyMembershipSerializer(serializers.ModelSerializer):
             'email': obj.user.email,
             'first_name': obj.user.first_name,
             'last_name': obj.user.last_name,
+        }
+
+    def get_pharmacy_details(self, obj):
+        return {
+            'id': str(obj.pharmacy_id),
+            'pharmacy_id': obj.pharmacy.pharmacy_id,
+            'brand_name': obj.pharmacy.brand_name,
+            'legal_name': obj.pharmacy.legal_name,
         }
 
     def validate_role(self, value):

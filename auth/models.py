@@ -157,9 +157,9 @@ class User(AbstractBaseUser, PermissionsMixin):
             return True
         return super().has_module_perms(app_label)
     def approve(self, approver):
-        """Approve user by pharmacy owner"""
-        if approver.role != 'PHARMACY_OWNER':
-            raise ValueError("Only pharmacy owners can approve users")
+        """Approve a user by pharmacy owner or platform administrator."""
+        if approver.role not in {'PHARMACY_OWNER', 'SUPER_ADMIN', 'PLATFORM_ADMIN'}:
+            raise ValueError("Only pharmacy owners and platform admins can approve users")
         
         self.is_approved = True
         self.approved_by = approver
@@ -169,9 +169,9 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.save(update_fields=['is_approved', 'approved_by', 'approved_at', 'account_status', 'updated_at'])
 
     def reject(self, approver):
-        """Reject user by pharmacy owner"""
-        if approver.role != 'PHARMACY_OWNER':
-            raise ValueError("Only pharmacy owners can reject users")
+        """Reject a user by pharmacy owner or platform administrator."""
+        if approver.role not in {'PHARMACY_OWNER', 'SUPER_ADMIN', 'PLATFORM_ADMIN'}:
+            raise ValueError("Only pharmacy owners and platform admins can reject users")
         
         self.is_approved = False
         self.account_status = 'REJECTED'

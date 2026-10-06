@@ -32,7 +32,8 @@ class ProcurementServiceTests(TestCase):
             verification_status='VERIFIED', location=Point(4, 7),
         )
         cls.medicine = Medicine.objects.create(
-            pharmacy=cls.pharmacy, generic_name='Paracetamol', brand_name='Test', strength='500mg',
+            created_by_pharmacy=cls.pharmacy, source='PHARMACY',
+            generic_name='Paracetamol', brand_name='Test', strength='500mg',
             dosage_form='TABLET', route='ORAL', created_by=cls.owner,
         )
         cls.inventory_item = PharmacyInventoryItem.objects.create(

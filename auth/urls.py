@@ -25,6 +25,9 @@ urlpatterns = [
     path('otp/verify/', views.OTPVerifyView.as_view(), name='otp_verify'),
     path('oauth/', views.SocialAuthView.as_view(), name='social_auth'),
     path('pending-users/', views.PendingUsersView.as_view(), name='pending_users'),
+    path('platform-users/', views.PlatformUserListView.as_view(), name='platform_users'),
+    path('platform-users/<uuid:pk>/', views.PlatformUserDetailView.as_view(), name='platform_user_detail'),
     path('approve-user/', views.ApproveUserView.as_view(), name='approve_user'),
     path('my-staff/', views.MyPharmacyStaffView.as_view(), name='my_staff'),
+    path('platform-activity/', views.PlatformActivityListView.as_view(), name='platform_activity'),
 ]

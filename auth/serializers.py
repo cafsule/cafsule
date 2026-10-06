@@ -1,6 +1,8 @@
-from rest_framework import serializers
+from rest_framework import serializers, status
+from rest_framework.exceptions import APIException
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth import authenticate
+from django.conf import settings
 from django.core.validators import EmailValidator
 from django.utils import timezone
 from django.db import transaction
@@ -18,21 +20,39 @@ class UserSerializer(serializers.ModelSerializer):
     """Serializer for User model - public representation"""
     
     full_name = serializers.SerializerMethodField()
+    pharmacy_memberships = serializers.SerializerMethodField()
     
     class Meta:
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'full_name',
             'phone_number', 'role', 'account_status', 'is_verified',
-            'is_active', 'date_joined', 'last_login'
+            'is_active', 'date_joined', 'last_login', 'pharmacy_memberships'
         ]
         read_only_fields = [
             'id', 'is_verified', 'account_status', 'date_joined',
-            'last_login', 'is_superuser', 'is_staff'
+            'last_login', 'is_superuser', 'is_staff', 'pharmacy_memberships'
         ]
     
     def get_full_name(self, obj):
         return obj.get_full_name()
+
+    def get_pharmacy_memberships(self, obj):
+        memberships = getattr(obj, 'pharmacy_memberships', None)
+        if memberships is None:
+            return []
+        return [
+            {
+                'id': str(member.id),
+                'pharmacy': str(member.pharmacy_id),
+                'role': member.role,
+                'status': member.status,
+                'approved_by': str(member.approved_by_id) if member.approved_by_id else None,
+                'approved_at': member.approved_at,
+                'created_at': member.created_at,
+            }
+            for member in memberships.select_related('pharmacy', 'approved_by').all()
+        ]
 
 class RegisterSerializer(serializers.ModelSerializer):
     """Serializer for user registration"""
@@ -125,13 +145,15 @@ class RegisterSerializer(serializers.ModelSerializer):
         user.is_verified = False
         user.save()
         
-        # Create verification token
-        from .tokens import generate_email_verification_token
-        from .tasks import send_verification_email
+        # Registration should use the existing OTP email verification flow that
+        # matches the frontend verification page and OTP endpoints.
+        # Keep the legacy email-token flow intact for compatibility, but do not
+        # send the link email during signup.
+        from .tasks import send_otp_email
+        from .tokens import generate_otp
+        otp = generate_otp(user, 'EMAIL_VERIFICATION')
+        send_otp_email(user.id, otp.otp_code, 'EMAIL_VERIFICATION')
 
-        token = generate_email_verification_token(user)
-        send_verification_email(user.id, token.token)
-        
         return user
 
 class LoginSerializer(serializers.Serializer):
@@ -232,25 +254,52 @@ class TokenRefreshSerializer(serializers.Serializer):
     refresh = serializers.CharField(required=True)
 
 
+class IdentityProviderUnavailable(APIException):
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    default_detail = 'Identity verification is temporarily unavailable.'
+
+
 class SocialAuthSerializer(serializers.Serializer):
-    """Serializer for social/OAuth login"""
+    """Verify Google's signed ID token before using its identity claims."""
 
-    PROVIDER_CHOICES = (
-        ('GOOGLE', 'Google'),
-        ('FACEBOOK', 'Facebook'),
-        ('APPLE', 'Apple'),
-    )
+    provider = serializers.ChoiceField(choices=(('GOOGLE', 'Google'),), required=True)
+    id_token = serializers.CharField(required=True, write_only=True, trim_whitespace=True)
 
-    provider = serializers.ChoiceField(choices=PROVIDER_CHOICES, required=True)
-    provider_user_id = serializers.CharField(required=True)
-    email = serializers.EmailField(required=False, allow_blank=True)
-    first_name = serializers.CharField(required=False, allow_blank=True)
-    last_name = serializers.CharField(required=False, allow_blank=True)
+    def validate(self, attrs):
+        if not settings.SOCIAL_AUTH_GOOGLE_OAUTH2_KEY:
+            raise IdentityProviderUnavailable('Google sign-in is not configured.')
 
-    def validate_email(self, value):
-        if value:
-            return value.lower().strip()
-        return value
+        # Google rotates signing keys. google-auth validates the signature,
+        # issuer, expiry, and configured client-ID audience using Google's keys.
+        from google.auth.exceptions import GoogleAuthError
+        from google.auth.transport.requests import Request
+        from google.oauth2 import id_token
+
+        try:
+            claims = id_token.verify_oauth2_token(
+                attrs['id_token'],
+                Request(),
+                audience=settings.SOCIAL_AUTH_GOOGLE_OAUTH2_KEY,
+            )
+        except ValueError as exc:
+            raise serializers.ValidationError({'id_token': 'Invalid Google ID token.'}) from exc
+        except GoogleAuthError as exc:
+            raise IdentityProviderUnavailable() from exc
+
+        email = claims.get('email')
+        provider_user_id = claims.get('sub')
+        if not provider_user_id or not email or claims.get('email_verified') is not True:
+            raise serializers.ValidationError(
+                {'id_token': 'The Google account must have a verified email address.'}
+            )
+
+        attrs.update({
+            'provider_user_id': provider_user_id,
+            'email': email.lower().strip(),
+            'first_name': claims.get('given_name', ''),
+            'last_name': claims.get('family_name', ''),
+        })
+        return attrs
 
 class ChangePasswordSerializer(serializers.Serializer):
     """Serializer for changing password"""

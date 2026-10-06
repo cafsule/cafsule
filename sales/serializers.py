@@ -309,6 +309,9 @@ class SaleDetailSerializer(serializers.ModelSerializer):
     )
     items = SaleItemDetailSerializer(many=True, read_only=True)
     stock_movements = StockMovementSerializer(many=True, read_only=True)
+    remaining_balance = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True
+    )
     
     class Meta:
         model = Sale
@@ -316,7 +319,7 @@ class SaleDetailSerializer(serializers.ModelSerializer):
             'id', 'receipt_number', 'pharmacy', 'pharmacy_name', 'customer',
             'customer_name', 'status', 'status_display', 'subtotal', 'discount',
             'tax', 'total', 'payment_status', 'payment_status_display',
-            'payment_method', 'amount_paid', 'notes', 'sold_by', 'created_at',
+            'payment_method', 'amount_paid', 'remaining_balance', 'notes', 'sold_by', 'created_at',
             'created_by', 'completed_at', 'voided_at', 'voided_by', 'void_reason',
             'items', 'stock_movements', 'updated_at'
         )
@@ -435,7 +438,7 @@ class SaleCompleteSerializer(serializers.Serializer):
     """
     
     payment_status = serializers.ChoiceField(
-        choices=['PENDING', 'PAID', 'PARTIAL', 'CANCELLED'],
+        choices=['PENDING', 'PAID', 'PARTIAL'],
         required=False,
         help_text="Final payment status for the sale"
     )
@@ -444,6 +447,7 @@ class SaleCompleteSerializer(serializers.Serializer):
         max_digits=12,
         decimal_places=2,
         required=False,
+        min_value=Decimal('0.00'),
         help_text="Amount actually paid"
     )
 

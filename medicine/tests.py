@@ -10,7 +10,11 @@ Tests cover:
 6. Price and status validation
 """
 
-from django.test import TestCase
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
+from django.db import IntegrityError, connections, transaction
+from django.test import TestCase, TransactionTestCase
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -56,9 +60,9 @@ class MedicineCreationTests(TestCase):
         self.staff.save()
     
     def test_admin_can_create_medicine(self):
-        """Test that PLATFORM_ADMIN can create medicines"""
+        """Test that PLATFORM_ADMIN creates medicines through the admin catalog endpoint."""
         self.client.force_authenticate(user=self.admin)
-        
+
         payload = {
             'generic_name': 'Paracetamol',
             'brand_name': 'Panadol',
@@ -69,13 +73,15 @@ class MedicineCreationTests(TestCase):
             'pack_size': 10,
             'pack_size_unit': 'UNIT'
         }
-        
-        response = self.client.post('/api/medicine/medicines/', payload)
+
+        response = self.client.post('/api/medicine/admin/medicines/', payload)
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        
+        self.assertEqual(response.data['source'], 'ADMIN')
+
         medicine = Medicine.objects.get(generic_name='Paracetamol')
         self.assertEqual(medicine.brand_name, 'Panadol')
         self.assertEqual(medicine.created_by_id, self.admin.id)
+        self.assertEqual(medicine.source, 'ADMIN')
     
     def test_staff_cannot_create_medicine(self):
         """Test that pharmacy staff cannot create medicines"""
@@ -90,6 +96,102 @@ class MedicineCreationTests(TestCase):
         
         response = self.client.post('/api/medicine/medicines/', payload)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_global_medicine_duplicate_prevention_across_pharmacies(self):
+        """The same medicine should not be duplicated across different pharmacies."""
+        first_pharmacy = PharmacyBrand.objects.create(
+            owner=User.objects.create_user(
+                email='owner1@pharmacy.com',
+                password='testpass123!',
+                first_name='Owner',
+                last_name='One',
+                role='PHARMACY_OWNER',
+            ),
+            legal_name='Pharmacy One',
+            brand_name='Pharmacy One',
+            verification_status='VERIFIED',
+        )
+        second_pharmacy = PharmacyBrand.objects.create(
+            owner=User.objects.create_user(
+                email='owner2@pharmacy.com',
+                password='testpass123!',
+                first_name='Owner',
+                last_name='Two',
+                role='PHARMACY_OWNER',
+            ),
+            legal_name='Pharmacy Two',
+            brand_name='Pharmacy Two',
+            verification_status='VERIFIED',
+        )
+
+        first_medicine, first_created = Medicine.get_or_create_global(
+            created_by=first_pharmacy.owner,
+            created_by_pharmacy=first_pharmacy,
+            source='PHARMACY',
+            generic_name='Paracetamol',
+            brand_name='Panadol',
+            strength='500mg',
+            dosage_form='TABLET',
+            route='ORAL',
+            manufacturer='Acme Pharma',
+        )
+
+        second_medicine, second_created = Medicine.get_or_create_global(
+            created_by=second_pharmacy.owner,
+            created_by_pharmacy=second_pharmacy,
+            source='PHARMACY',
+            generic_name='Paracetamol',
+            brand_name='Panadol',
+            strength='500mg',
+            dosage_form='TABLET',
+            route='ORAL',
+            manufacturer='Acme Pharma',
+        )
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first_medicine.pk, second_medicine.pk)
+        self.assertEqual(
+            Medicine.objects.filter(
+                generic_name='Paracetamol',
+                brand_name='Panadol',
+                strength='500mg',
+                dosage_form='TABLET',
+                route='ORAL',
+                manufacturer='Acme Pharma',
+            ).count(),
+            1,
+        )
+
+    def test_database_constraint_blocks_direct_equivalent_duplicate(self):
+        fields = {
+            'generic_name': 'Metformin',
+            'brand_name': 'Glucophage',
+            'strength': '500mg',
+            'dosage_form': 'TABLET',
+            'route': 'ORAL',
+            'manufacturer': 'Acme',
+            'pack_size': 30,
+            'pack_size_unit': 'PACK',
+        }
+        Medicine.objects.create(**fields)
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Medicine.objects.create(
+                    **{
+                        **fields,
+                        'generic_name': ' metformin ',
+                        'strength': '500 mg',
+                        'manufacturer': ' acme ',
+                    }
+                )
+
+    def test_medicine_model_has_no_pharmacy_ownership_field(self):
+        field_names = {field.name for field in Medicine._meta.fields}
+
+        self.assertNotIn('pharmacy', field_names)
+        self.assertIn('created_by_pharmacy', field_names)
     
     def test_staff_can_view_medicines(self):
         """Test that pharmacy staff can view medicines"""
@@ -106,8 +208,9 @@ class MedicineCreationTests(TestCase):
         response = self.client.get('/api/medicine/medicines/')
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]['generic_name'], 'Ibuprofen')
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(len(response.data['results']), 1)
+        self.assertEqual(response.data['results'][0]['generic_name'], 'Ibuprofen')
     
     def test_medicine_search(self):
         """Test medicine search functionality"""
@@ -134,6 +237,461 @@ class MedicineCreationTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]['generic_name'], 'Paracetamol')
+
+
+class MedicineApiContractTests(TestCase):
+    """Tests for the global catalog API contract and provenance safety."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+        self.admin = User.objects.create_user(
+            email='api-admin@platform.com',
+            password='testpass123!',
+            first_name='Api',
+            last_name='Admin',
+            role='PLATFORM_ADMIN',
+        )
+        self.admin.is_verified = True
+        self.admin.is_active = True
+        self.admin.save()
+
+        self.owner = User.objects.create_user(
+            email='api-owner@pharmacy.com',
+            password='testpass123!',
+            first_name='Api',
+            last_name='Owner',
+            role='PHARMACY_OWNER',
+        )
+        self.owner.is_verified = True
+        self.owner.is_active = True
+        self.owner.save()
+
+        self.pharmacy = PharmacyBrand.objects.create(
+            owner=self.owner,
+            legal_name='API Pharmacy Legal',
+            brand_name='API Pharmacy',
+            verification_status='VERIFIED',
+        )
+
+        self.other_owner = User.objects.create_user(
+            email='api-other-owner@pharmacy.com',
+            password='testpass123!',
+            role='PHARMACY_OWNER',
+        )
+        self.other_pharmacy = PharmacyBrand.objects.create(
+            owner=self.other_owner,
+            legal_name='Other API Pharmacy Legal',
+            brand_name='Other API Pharmacy',
+            verification_status='VERIFIED',
+        )
+
+    def test_pharmacy_create_response_hides_admin_provenance_fields(self):
+        """Pharmacy create must return the pharmacy-safe catalog representation."""
+        self.client.force_authenticate(user=self.owner)
+
+        payload = {
+            'generic_name': 'Amoxicillin',
+            'brand_name': 'Amoxil',
+            'strength': '500mg',
+            'dosage_form': 'CAPSULE',
+            'route': 'ORAL',
+            'manufacturer': 'Pharma API',
+            'pack_size': 12,
+            'pack_size_unit': 'UNIT',
+            'source': 'ADMIN',
+            'created_by': str(self.admin.id),
+            'created_by_pharmacy': str(self.other_pharmacy.id),
+            'creator_role': 'PLATFORM_ADMIN',
+        }
+
+        response = self.client.post('/api/medicine/medicines/', payload)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn('generic_name', response.data)
+        self.assertNotIn('source', response.data)
+        self.assertNotIn('created_by', response.data)
+        self.assertNotIn('creator_role', response.data)
+        self.assertNotIn('creator_pharmacy', response.data)
+        self.assertNotIn('verification_status', response.data)
+
+        medicine = Medicine.objects.get(generic_name='Amoxicillin')
+        self.assertEqual(medicine.source, 'PHARMACY')
+        self.assertEqual(medicine.created_by_id, self.owner.id)
+        self.assertEqual(medicine.created_by_pharmacy, self.pharmacy)
+
+    def test_admin_create_endpoint_assigns_admin_provenance(self):
+        """Platform admins must create via the dedicated admin endpoint."""
+        self.client.force_authenticate(user=self.admin)
+
+        payload = {
+            'generic_name': 'Cefuroxime',
+            'brand_name': 'Zinacef',
+            'strength': '250mg',
+            'dosage_form': 'TABLET',
+            'route': 'ORAL',
+            'manufacturer': 'Platform Pharma',
+            'pack_size': 10,
+            'pack_size_unit': 'PACK',
+            'source': 'PHARMACY',
+            'created_by': str(self.owner.id),
+            'created_by_pharmacy': str(self.pharmacy.id),
+        }
+
+        response = self.client.post('/api/medicine/admin/medicines/', payload)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['source'], 'ADMIN')
+        self.assertEqual(response.data['created_by'], self.admin.id)
+
+        medicine = Medicine.objects.get(id=response.data['id'])
+        self.assertEqual(medicine.source, 'ADMIN')
+        self.assertEqual(medicine.created_by_id, self.admin.id)
+        self.assertIsNone(medicine.created_by_pharmacy_id)
+
+    def test_non_admin_cannot_create_via_admin_endpoint(self):
+        """Only platform admins may use the admin creation API."""
+        self.client.force_authenticate(user=self.owner)
+
+        payload = {
+            'generic_name': 'Clarithromycin',
+            'strength': '500mg',
+            'dosage_form': 'TABLET',
+            'route': 'ORAL',
+            'manufacturer': 'Owner Pharma',
+        }
+
+        response = self.client.post('/api/medicine/admin/medicines/', payload)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_pharmacy_source_spoofing_is_rejected(self):
+        """Client-controlled source values must not impersonate admin provenance."""
+        self.client.force_authenticate(user=self.owner)
+
+        payload = {
+            'generic_name': 'Azithromycin',
+            'brand_name': 'Zithromax',
+            'strength': '250mg',
+            'dosage_form': 'TABLET',
+            'route': 'ORAL',
+            'manufacturer': 'Spoof Pharma',
+            'source': 'ADMIN',
+        }
+
+        response = self.client.post('/api/medicine/medicines/', payload)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        medicine = Medicine.objects.get(generic_name='Azithromycin')
+        self.assertEqual(medicine.source, 'PHARMACY')
+        self.assertNotEqual(medicine.source, 'ADMIN')
+
+    def test_duplicate_submission_reuses_normalized_global_medicine(self):
+        self.client.force_authenticate(user=self.owner)
+        payload = {
+            'generic_name': 'Ibuprofen',
+            'brand_name': 'Relief',
+            'strength': '200mg',
+            'dosage_form': 'TABLET',
+            'route': 'ORAL',
+            'manufacturer': 'Acme Pharma',
+            'pack_size': 10,
+            'pack_size_unit': 'PACK',
+        }
+
+        first = self.client.post('/api/medicine/medicines/', payload)
+        duplicate = self.client.post('/api/medicine/medicines/', {
+            **payload,
+            'generic_name': '  IBUPROFEN ',
+            'strength': '200 mg',
+            'manufacturer': ' acme   pharma ',
+        })
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(duplicate.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(first.data['id'], duplicate.data['id'])
+        self.assertEqual(Medicine.objects.filter(generic_name__iexact='ibuprofen').count(), 1)
+
+    def test_pharmacy_search_is_global_and_pharmacy_cannot_edit_catalog(self):
+        medicine, _ = Medicine.get_or_create_global(
+            created_by=self.admin,
+            source='ADMIN',
+            generic_name='GlobalSearchMedicine',
+            brand_name='',
+            strength='500mg',
+            dosage_form='TABLET',
+            route='ORAL',
+            manufacturer='',
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        search = self.client.get('/api/medicine/medicines/search/?q=globalsearchmedicine')
+        update = self.client.patch(
+            f'/api/medicine/medicines/{medicine.id}/',
+            {'strength': '650mg'},
+        )
+
+        self.assertEqual(search.status_code, status.HTTP_200_OK)
+        self.assertEqual([row['id'] for row in search.data], [str(medicine.id)])
+        self.assertEqual(update.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_admin_can_update_global_medicine_without_changing_provenance(self):
+        self.client.force_authenticate(user=self.admin)
+        created = self.client.post('/api/medicine/admin/medicines/', {
+            'generic_name': 'Cefalexin',
+            'brand_name': 'Keflex',
+            'strength': '250mg',
+            'dosage_form': 'CAPSULE',
+            'route': 'ORAL',
+            'manufacturer': 'Acme',
+        })
+        medicine_id = created.data['id']
+
+        updated = self.client.patch(
+            f'/api/medicine/admin/medicines/{medicine_id}/',
+            {'strength': '500mg', 'source': 'PHARMACY', 'created_by': str(self.owner.id)},
+        )
+
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(updated.status_code, status.HTTP_200_OK)
+        self.assertEqual(updated.data['strength'], '500mg')
+        self.assertEqual(updated.data['source'], 'ADMIN')
+        self.assertEqual(updated.data['created_by'], self.admin.id)
+
+    def test_same_global_medicine_can_be_in_two_isolated_pharmacy_inventories(self):
+        from inventory.models import PharmacyInventoryItem
+
+        medicine = Medicine.objects.create(
+            generic_name='Shared catalog item',
+            brand_name='',
+            strength='100mg',
+            dosage_form='TABLET',
+            route='ORAL',
+        )
+        inventory_a = PharmacyInventoryItem.objects.create(
+            pharmacy=self.pharmacy,
+            medicine=medicine,
+            selling_price=Decimal('10.00'),
+        )
+        inventory_b = PharmacyInventoryItem.objects.create(
+            pharmacy=self.other_pharmacy,
+            medicine=medicine,
+            selling_price=Decimal('20.00'),
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get('/api/inventory/items/')
+
+        self.assertEqual(inventory_a.medicine_id, inventory_b.medicine_id)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([row['id'] for row in response.data], [str(inventory_a.id)])
+        self.assertEqual(response.data[0]['medicine_id'], str(medicine.id))
+
+    def test_pharmacy_manager_requires_approved_membership_and_selected_pharmacy(self):
+        manager = User.objects.create_user(
+            email='api-manager@pharmacy.com',
+            password='testpass123!',
+            role='PHARMACY_MANAGER',
+        )
+        PharmacyMembership.objects.create(
+            pharmacy=self.pharmacy,
+            user=manager,
+            role='PHARMACY_MANAGER',
+            status='APPROVED',
+            approved_by=self.owner,
+        )
+        self.client.force_authenticate(user=manager)
+        response = self.client.post('/api/medicine/medicines/', {
+            'generic_name': 'Manager submitted item',
+            'brand_name': '',
+            'strength': '5mg',
+            'dosage_form': 'TABLET',
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        medicine = Medicine.objects.get(generic_name='Manager submitted item')
+        self.assertEqual(medicine.created_by_id, manager.id)
+        self.assertEqual(medicine.created_by_pharmacy_id, self.pharmacy.id)
+
+
+class GreenbookImportServiceTests(TestCase):
+    """Tests for controlled Greenbook data import into the global medicine catalog."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='greenbook-admin@platform.com',
+            password='testpass123!',
+            first_name='Greenbook',
+            last_name='Admin',
+            role='PLATFORM_ADMIN',
+        )
+        self.admin.is_verified = True
+        self.admin.is_active = True
+        self.admin.save()
+
+        self.owner = User.objects.create_user(
+            email='greenbook-owner@pharmacy.com',
+            password='testpass123!',
+            first_name='Greenbook',
+            last_name='Owner',
+            role='PHARMACY_OWNER',
+        )
+        self.pharmacy = PharmacyBrand.objects.create(
+            owner=self.owner,
+            legal_name='Greenbook Pharmacy',
+            brand_name='Greenbook Pharmacy',
+            verification_status='VERIFIED',
+        )
+
+    def test_greenbook_csv_import_creates_public_database_records(self):
+        from medicine.services import GreenbookImportService
+
+        csv_content = """product_name,active_ingredients,product_category,form,route,strengths,nrn,applicant_name,approval_date,status
+Panadol,Paracetamol,Analgesic,TABLET,ORAL,500mg,NRN-1001,Acme Pharma,2024-01-05,APPROVED
+"""
+
+        with self.settings(ALLOWED_HOSTS=['*']):
+            with open('/tmp/greenbook-test.csv', 'w', encoding='utf-8') as handle:
+                handle.write(csv_content)
+
+            result = GreenbookImportService().import_file('/tmp/greenbook-test.csv')
+
+        self.assertEqual(result.created, 1)
+        self.assertEqual(result.rows_read, 1)
+        self.assertEqual(Medicine.objects.filter(source='PUBLIC_DATABASE').count(), 1)
+        medicine = Medicine.objects.get(source='PUBLIC_DATABASE')
+        self.assertEqual(medicine.generic_name, 'Paracetamol')
+        self.assertEqual(medicine.brand_name, 'Panadol')
+        self.assertEqual(medicine.strength, '500mg')
+        self.assertEqual(medicine.nafdac_registration, 'NRN-1001')
+
+    def test_greenbook_import_is_idempotent_for_duplicate_rows(self):
+        from medicine.services import GreenbookImportService
+
+        records = [{
+            'product_name': 'Amoxicillin 500mg Capsule',
+            'active_ingredients': 'Amoxicillin',
+            'form': 'CAPSULE',
+            'route': 'ORAL',
+            'strengths': '500mg',
+            'nrn': 'NRN-2002',
+            'applicant_name': 'Alpha Pharma',
+        }]
+
+        first = GreenbookImportService().import_records(records)
+        second = GreenbookImportService().import_records(records)
+
+        self.assertEqual(first.created, 1)
+        self.assertEqual(second.created, 0)
+        self.assertEqual(Medicine.objects.filter(source='PUBLIC_DATABASE').count(), 1)
+
+    def test_greenbook_dry_run_does_not_write_database(self):
+        from medicine.services import GreenbookImportService
+
+        records = [{
+            'product_name': 'Ibuprofen 200mg Tablet',
+            'active_ingredients': 'Ibuprofen',
+            'form': 'TABLET',
+            'route': 'ORAL',
+            'strengths': '200mg',
+            'nrn': 'NRN-3003',
+            'applicant_name': 'Beta Pharma',
+        }]
+
+        result = GreenbookImportService().import_records(records, dry_run=True)
+
+        self.assertEqual(result.created, 1)
+        self.assertEqual(Medicine.objects.count(), 0)
+        self.assertEqual(result.matched, 0)
+
+    def test_greenbook_import_preserves_existing_pharmacy_provenance(self):
+        from medicine.services import GreenbookImportService
+
+        medicine = Medicine.objects.create(
+            generic_name='Amoxicillin',
+            brand_name='Amoxil',
+            strength='500mg',
+            dosage_form='CAPSULE',
+            route='ORAL',
+            manufacturer='Local Lab',
+            created_by=self.owner,
+            created_by_pharmacy=self.pharmacy,
+            source='PHARMACY',
+        )
+
+        result = GreenbookImportService().import_records([{
+            'product_name': 'Amoxil',
+            'active_ingredients': 'Amoxicillin',
+            'form': 'CAPSULE',
+            'route': 'ORAL',
+            'strengths': '500mg',
+            'nrn': 'NRN-4004',
+            'applicant_name': 'Public Registry Lab',
+        }])
+
+        medicine.refresh_from_db()
+        self.assertEqual(result.matched, 1)
+        self.assertEqual(medicine.source, 'PHARMACY')
+        self.assertEqual(medicine.created_by_pharmacy_id, self.pharmacy.id)
+        self.assertEqual(medicine.created_by_id, self.owner.id)
+        self.assertEqual(medicine.nafdac_registration, 'NRN-4004')
+
+    def test_greenbook_import_reports_malformed_rows(self):
+        from medicine.services import GreenbookImportService
+
+        result = GreenbookImportService().import_records([
+            {'product_name': 'Broken', 'form': 'TABLET', 'route': 'ORAL', 'strengths': '500mg'},
+        ])
+
+        self.assertEqual(result.errors, 1)
+        self.assertIn('missing required fields', str(result.messages[0]).lower())
+
+
+class ConcurrentMedicineCreationTests(TransactionTestCase):
+    """Database-level duplicate protection for simultaneous catalog creation."""
+
+    reset_sequences = True
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            email='concurrent-owner@pharmacy.com',
+            password='testpass123!',
+            role='PHARMACY_OWNER',
+        )
+        self.pharmacy = PharmacyBrand.objects.create(
+            owner=self.owner,
+            legal_name='Concurrent Pharmacy Legal',
+            brand_name='Concurrent Pharmacy',
+            verification_status='VERIFIED',
+        )
+        self.barrier = Barrier(2)
+        self.fields = {
+            'generic_name': 'Concurrent medicine',
+            'brand_name': 'RaceTest',
+            'strength': '50mg',
+            'dosage_form': 'TABLET',
+            'route': 'ORAL',
+            'manufacturer': 'Cafsule Test',
+            'pack_size': 10,
+            'pack_size_unit': 'PACK',
+        }
+
+    def create_same_medicine(self):
+        try:
+            self.barrier.wait(timeout=10)
+            return Medicine.get_or_create_global(
+                created_by=self.owner,
+                created_by_pharmacy=self.pharmacy,
+                source='PHARMACY',
+                **self.fields,
+            )
+        finally:
+            connections.close_all()
+
+    def test_concurrent_equivalent_submissions_create_one_catalog_record(self):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(self.create_same_medicine) for _ in range(2)]
+            results = [future.result(timeout=30) for future in futures]
+
+        self.assertEqual(Medicine.objects.filter(generic_name='Concurrent medicine').count(), 1)
+        self.assertEqual(len({medicine.id for medicine, _ in results}), 1)
+        self.assertEqual(sum(created for _, created in results), 1)
 
 
 class PharmacyInventoryTests(TestCase):

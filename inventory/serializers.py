@@ -55,13 +55,17 @@ class PharmacyInventoryListSerializer(serializers.ModelSerializer):
     """Simplified inventory item listing"""
     
     medicine_display = serializers.SerializerMethodField()
+    medicine_id = serializers.UUIDField(read_only=True)
+    pharmacy_name = serializers.CharField(source='pharmacy.brand_name', read_only=True)
+    pharmacy_id = serializers.CharField(source='pharmacy.pharmacy_id', read_only=True)
     total_quantity = serializers.ReadOnlyField()
     
     class Meta:
         model = PharmacyInventoryItem
         fields = (
-            'id', 'medicine_display', 'selling_price', 'reorder_level', 'status',
-            'is_published', 'total_quantity', 'created_at'
+            'id', 'medicine', 'medicine_id', 'medicine_display', 'pharmacy', 'pharmacy_name',
+            'pharmacy_id', 'selling_price', 'reorder_level', 'status', 'is_published',
+            'total_quantity', 'created_at', 'updated_at'
         )
         read_only_fields = fields
     

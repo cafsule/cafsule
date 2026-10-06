@@ -32,6 +32,11 @@ def _normalize_csrf_origins(values):
     return [_ensure_https_origin(value) for value in values]
 
 
+def _looks_like_placeholder(value):
+    normalized = str(value).strip().lower()
+    return any(marker in normalized for marker in ('replace-', 'your-', 'change-me', 'changeme', 'placeholder', 'example'))
+
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(os.path.join(BASE_DIR, '.env'))  # Load environment variables from .env file
@@ -48,15 +53,25 @@ if not SECRET_KEY:
 if not DEBUG and SECRET_KEY == 'django-insecure-development-key-change-me':
     raise ImproperlyConfigured('Production SECRET_KEY cannot use the development fallback value.')
 
+if not DEBUG and _looks_like_placeholder(SECRET_KEY):
+    raise ImproperlyConfigured('Production SECRET_KEY must be replaced with a unique random value.')
+
 if not DEBUG and len(SECRET_KEY) < 50:
     raise ImproperlyConfigured('SECRET_KEY must be at least 50 characters for production security.')
 
 JWT_SIGNING_KEY = os.getenv('JWT_SIGNING_KEY')
+<<<<<<< HEAD
 if not DEBUG:  # Only enforce the strict requirement in production
     if not JWT_SIGNING_KEY or len(JWT_SIGNING_KEY.encode('utf-8')) < 32:
         raise ImproperlyConfigured('JWT_SIGNING_KEY must be provided through the environment and be at least 32 bytes long.')
 else:  # DEBUG mode: provide a dummy value if not set (for collectstatic during build)
     JWT_SIGNING_KEY = JWT_SIGNING_KEY or 'dummy-development-jwt-key-32-bytes-long-enough'
+=======
+if not JWT_SIGNING_KEY or len(JWT_SIGNING_KEY.encode('utf-8')) < 32:
+    raise ImproperlyConfigured('JWT_SIGNING_KEY must be provided through the environment and be at least 32 bytes long.')
+if not DEBUG and _looks_like_placeholder(JWT_SIGNING_KEY):
+    raise ImproperlyConfigured('Production JWT_SIGNING_KEY must be replaced with a unique random value.')
+>>>>>>> 1d26851 (Prepare Cafsule backend for deployment)
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=int(os.getenv('JWT_ACCESS_TOKEN_LIFETIME_MINUTES', 30))),
@@ -114,6 +129,7 @@ INSTALLED_APPS = [
     'reports',
     'procurement',
     'expenses',
+    'feedback',
     'rest_framework',
     'pharmacy',
     'medicine',
@@ -164,17 +180,24 @@ WSGI_APPLICATION = 'main.wsgi.application'
 def _build_database_config():
     """Return a valid PostGIS PostgreSQL database config.
 
-    Prefer DATABASE_URL when it is already set (for Neon, Heroku, Render, etc.).
-    Otherwise, build it from the project's existing DB_* variables so local dev and
-    Docker share the same configuration without hardcoding credentials in source.
+    Prefer DATABASE_URL when it is set (for managed PostgreSQL providers), while
+    an explicit DB_HOST remains authoritative for the connection host.
+    Otherwise, build it from DB_* variables so local development and Compose can
+    use their appropriate database host without hardcoding credentials in source.
     """
     env_database_url = os.getenv('DATABASE_URL')
-    if env_database_url:
+    # Compose explicitly blanks the host-run DATABASE_URL by default, preventing
+    # a .env value pointing at 127.0.0.1 from leaking into container networking.
+    # A managed Compose URL is passed separately through COMPOSE_DATABASE_URL.
+    use_compose_db_service = os.getenv('DB_HOST') == 'db' and not env_database_url
+    if env_database_url and not use_compose_db_service:
         config = dj_database_url.config(
             default=env_database_url,
             conn_max_age=600,
             conn_health_checks=True,
         )
+        if 'DB_HOST' in os.environ:
+            config['HOST'] = os.environ['DB_HOST']
         config['ENGINE'] = 'django.contrib.gis.db.backends.postgis'
         return config
 
@@ -247,7 +270,30 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static']
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 MEDIA_URL = os.getenv('MEDIA_URL', '/media/')
-MEDIA_ROOT = BASE_DIR / os.getenv('MEDIA_ROOT', 'media')
+_media_root_setting = os.getenv('MEDIA_ROOT', 'media').strip()
+_configured_media_root = Path(_media_root_setting).expanduser()
+if DEBUG:
+    MEDIA_ROOT = (_configured_media_root if _configured_media_root.is_absolute()
+                  else BASE_DIR / _configured_media_root).resolve()
+    MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
+else:
+    if not _media_root_setting:
+        raise ImproperlyConfigured(
+            'Set MEDIA_ROOT to an absolute path on a mounted durable filesystem when DEBUG=False.'
+        )
+    if not _configured_media_root.is_absolute():
+        raise ImproperlyConfigured(
+            'Production MEDIA_ROOT must be an absolute path on a mounted durable filesystem.'
+        )
+    MEDIA_ROOT = _configured_media_root.resolve()
+    if MEDIA_ROOT == BASE_DIR or BASE_DIR in MEDIA_ROOT.parents:
+        raise ImproperlyConfigured(
+            'Production MEDIA_ROOT must be outside the application directory and point to a mounted durable filesystem.'
+        )
+    if not MEDIA_ROOT.is_dir():
+        raise ImproperlyConfigured(
+            f'Production MEDIA_ROOT {MEDIA_ROOT} does not exist; mount the durable media volume before startup.'
+        )
 
 LOGGING = {
     'version': 1,
@@ -288,6 +334,10 @@ PASSWORD_RESET_TOKEN_EXPIRY_HOURS = int(os.getenv('PASSWORD_RESET_TOKEN_EXPIRY_H
 #Email Configuration
 
 EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+if not DEBUG and EMAIL_BACKEND == 'django.core.mail.backends.console.EmailBackend':
+    raise ImproperlyConfigured(
+        'A real EMAIL_BACKEND must be configured when DEBUG=False.'
+    )
 EMAIL_HOST = os.getenv('EMAIL_HOST', 'localhost')
 EMAIL_PORT = int(os.getenv('EMAIL_PORT', 25))
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
@@ -295,12 +345,30 @@ EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'False').lower() == 'true'
 EMAIL_USE_SSL = os.getenv('EMAIL_USE_SSL', 'False').lower() == 'true'
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@pharmacy-ims.com')
+FEEDBACK_RECIPIENT_EMAIL = os.getenv('FEEDBACK_RECIPIENT_EMAIL', 'codemaniac13@gmail.com')
+if not DEBUG:
+    required_email_settings = {
+        'EMAIL_HOST': os.getenv('EMAIL_HOST', '').strip(),
+        'EMAIL_PORT': os.getenv('EMAIL_PORT', '').strip(),
+        'EMAIL_HOST_USER': EMAIL_HOST_USER,
+        'EMAIL_HOST_PASSWORD': EMAIL_HOST_PASSWORD,
+        'DEFAULT_FROM_EMAIL': os.getenv('DEFAULT_FROM_EMAIL', '').strip(),
+    }
+    missing_email_settings = [
+        name for name, value in required_email_settings.items()
+        if not str(value).strip() or _looks_like_placeholder(value)
+    ]
+    if missing_email_settings:
+        raise ImproperlyConfigured(
+            'Production email configuration must provide: ' + ', '.join(missing_email_settings) + '.'
+        )
+    if EMAIL_USE_TLS and EMAIL_USE_SSL:
+        raise ImproperlyConfigured('Set only one of EMAIL_USE_TLS and EMAIL_USE_SSL in production.')
 
 # OAuth Configuration
 
 SOCIAL_AUTH_GOOGLE_OAUTH2_KEY = os.getenv('GOOGLE_CLIENT_ID', '')
 SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
-SOCIAL_AUTH_GOOGLE_OAUTH2_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', '')
 
 # Rate Limiting
 REST_FRAMEWORK = {
@@ -333,14 +401,23 @@ CORS_ALLOW_ALL_ORIGINS = _get_bool_env('CORS_ALLOW_ALL_ORIGINS', 'False')
 # Or more securely (recommended)
 CORS_ALLOWED_ORIGINS = _get_csv_env(
     'CORS_ALLOWED_ORIGINS',
-    'https://localhost:3000,https://localhost:5173,https://localhost:8000,https://127.0.0.1:3000,https://127.0.0.1:5173,https://127.0.0.1:8000,https://cafsule.com,https://www.cafsule.com'
+    'http://localhost:3000,http://localhost:5173,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:5173,http://127.0.0.1:8000'
 )
 CSRF_TRUSTED_ORIGINS = _normalize_csrf_origins(
     _get_csv_env(
         'CSRF_TRUSTED_ORIGINS',
-        'https://localhost:3000,https://localhost:5173,https://localhost:8000,https://127.0.0.1:3000,https://127.0.0.1:5173,https://127.0.0.1:8000,https://cafsule.com,https://www.cafsule.com,https://api.cafsule.com'
+        'http://localhost:3000,http://localhost:5173,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:5173,http://127.0.0.1:8000'
     )
 )
+if not DEBUG:
+    required_origins = ('ALLOWED_HOSTS', 'CORS_ALLOWED_ORIGINS', 'CSRF_TRUSTED_ORIGINS')
+    missing_origins = [name for name in required_origins if not os.getenv(name, '').strip()]
+    if missing_origins:
+        raise ImproperlyConfigured(
+            'Production must explicitly configure ' + ', '.join(missing_origins) + '.'
+        )
+    if _get_bool_env('CORS_ALLOW_ALL_ORIGINS', 'False'):
+        raise ImproperlyConfigured('CORS_ALLOW_ALL_ORIGINS must be False when DEBUG=False.')
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 SECURE_SSL_REDIRECT = not DEBUG
@@ -416,5 +493,3 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
 CELERY_TASK_ALWAYS_EAGER = os.getenv('CELERY_TASK_ALWAYS_EAGER', 'True').lower() == 'true'  # Synchronous execution by default
 SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
-
-

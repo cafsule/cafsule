@@ -24,6 +24,7 @@ from django.contrib.gis.geos import Point
 from pharmacy.models import PharmacyBrand, PharmacyMembership
 from medicine.models import Medicine
 from inventory.models import PharmacyInventoryItem, InventoryBatch, CustomerReturn, InventoryHold, StockReconciliation
+from inventory.serializers import PharmacyInventoryListSerializer
 from sales.models import Sale, SaleItem, SaleItemBatchAllocation, StockMovement, Customer
 from .services import (
     StockAdjustmentService, DamageService, ExpiryService, LossService,
@@ -256,6 +257,16 @@ class StockAdjustmentServiceTests(TestDataSetup):
         self.assertEqual(movement.quantity_change, 5)
         self.assertEqual(movement.reason, 'FOUND')
         self.assertIn('Lost item found', movement.notes or '')
+
+
+class InventorySerializerContractTests(TestDataSetup):
+    """Contract tests for inventory list serialization."""
+
+    def test_inventory_list_serializer_exposes_medicine_id(self):
+        data = PharmacyInventoryListSerializer(self.inventory_item).data
+
+        self.assertIn('medicine_id', data)
+        self.assertEqual(str(self.inventory_item.medicine_id), str(data['medicine_id']))
 
 
 # ============================================================================

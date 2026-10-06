@@ -318,8 +318,6 @@ def validate_submission(brand):
     for field, label in (
         ('brand_name', 'pharmacy name'), ('owner_id', 'owner'),
         ('address_line_1', 'address'), ('state', 'state'),
-        ('cac_registration_number', 'CAC registration number'),
-        ('pcn_premises_registration_number', 'PCN premises registration information'),
     ):
         if not getattr(brand, field, None):
             missing.append(label)

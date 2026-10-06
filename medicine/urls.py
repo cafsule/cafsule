@@ -1,14 +1,10 @@
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
-
-# Note: Medicine endpoints are now accessed through pharmacy-specific routes
-# GET /api/pharmacy/brands/{pharmacy_id}/medicines/ - List pharmacy medicines
-# POST /api/pharmacy/brands/{pharmacy_id}/medicines/ - Create medicine
-# GET /api/pharmacy/brands/{pharmacy_id}/medicines/{id}/ - Get medicine
-# PATCH /api/pharmacy/brands/{pharmacy_id}/medicines/{id}/ - Update medicine
-# DELETE /api/pharmacy/brands/{pharmacy_id}/medicines/{id}/ - Delete medicine
+from django.urls import path
+from .views import PharmacyMedicineViewSet, PlatformMedicineViewSet
 
 urlpatterns = [
-    # All medicine endpoints are now managed through pharmacy routes
-    # See pharmacy/urls.py for the medicine endpoints
+    path('medicines/', PharmacyMedicineViewSet.as_view({'get': 'list', 'post': 'create'}), name='global-medicines-list'),
+    path('medicines/search/', PharmacyMedicineViewSet.as_view({'get': 'search'}), name='global-medicines-search'),
+    path('medicines/<uuid:pk>/', PharmacyMedicineViewSet.as_view({'get': 'retrieve'}), name='global-medicines-detail'),
+    path('admin/medicines/', PlatformMedicineViewSet.as_view({'get': 'list', 'post': 'create'}), name='platform-medicines-list'),
+    path('admin/medicines/<uuid:pk>/', PlatformMedicineViewSet.as_view({'get': 'retrieve', 'patch': 'partial_update', 'put': 'update'}), name='platform-medicines-detail'),
 ]

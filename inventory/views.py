@@ -66,8 +66,7 @@ class PharmacyInventoryViewSet(viewsets.ModelViewSet):
         
         if user.role in ('SUPER_ADMIN', 'PLATFORM_ADMIN'):
             qs = PharmacyInventoryItem.objects.all().select_related('pharmacy', 'medicine')
-        
-        if user.role == 'PHARMACY_OWNER':
+        elif user.role == 'PHARMACY_OWNER':
             try:
                 pharmacy = user.owned_pharmacy_brand
                 qs = PharmacyInventoryItem.objects.filter(
@@ -82,6 +81,10 @@ class PharmacyInventoryViewSet(viewsets.ModelViewSet):
             qs = PharmacyInventoryItem.objects.filter(
                 pharmacy_id__in=memberships
             ).select_related('pharmacy', 'medicine')
+
+        pharmacy_id = self.request.query_params.get('pharmacy')
+        if pharmacy_id and user.role in ('SUPER_ADMIN', 'PLATFORM_ADMIN'):
+            qs = qs.filter(pharmacy_id=pharmacy_id)
 
         search = self.request.query_params.get('search', '').strip()
         if search:
