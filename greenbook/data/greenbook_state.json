@@ -1,0 +1,10 @@
+{
+  "category": "Drugs",
+  "category_id": 1,
+  "batch_size": 1000,
+  "last_source_position": 7447,
+  "next_source_position": 7448,
+  "batches_completed": 8,
+  "total_unique_records": 7447,
+  "updated_at": "2026-10-02T21:44:27.011202+00:00"
+}

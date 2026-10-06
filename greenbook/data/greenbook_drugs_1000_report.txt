@@ -1,0 +1,16 @@
+Greenbook Drug Extraction
+-------------------------
+Source: Greenbook NAFDAC
+Category: Drugs
+Category ID: 1
+Available filtered records: 7449
+Requested: 1000
+Fetched: 1000
+Accepted: 1000
+Rejected: 0
+Duplicates: 0
+Devices: 0
+Non-drug categories: 0
+Final unique records: 1000
+First product ID: 8875
+Last product ID: 8401
