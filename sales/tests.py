@@ -486,10 +486,10 @@ class SaleCompletionTestCase(TransactionTestCase):
             balance_after=Decimal('550.00'),
         )
 
-        for paid, expected_outstanding, expected_balance in (
-            (Decimal('0.00'), Decimal('1050.00'), Decimal('1600.00')),
-            (Decimal('500.00'), Decimal('550.00'), Decimal('1100.00')),
-            (Decimal('1050.00'), Decimal('0.00'), Decimal('550.00')),
+        for paid, expected_outstanding, expected_balance, expected_status in (
+            (Decimal('0.00'), Decimal('1050.00'), Decimal('1600.00'), 'PENDING'),
+            (Decimal('500.00'), Decimal('550.00'), Decimal('1100.00'), 'PARTIAL'),
+            (Decimal('1050.00'), Decimal('0.00'), Decimal('550.00'), 'PAID'),
         ):
             with self.subTest(paid=paid):
                 sale = Sale.objects.create(
@@ -517,6 +517,7 @@ class SaleCompletionTestCase(TransactionTestCase):
                 sale.refresh_from_db()
                 ledger_entry = sale.ledger_entries.get(entry_type='CREDIT_SALE') if expected_outstanding else None
                 self.assertEqual(sale.remaining_balance, expected_outstanding)
+                self.assertEqual(sale.payment_status, expected_status)
                 if ledger_entry:
                     self.assertEqual(ledger_entry.amount, expected_outstanding)
                     self.assertEqual(ledger_entry.balance_after, expected_balance)
@@ -679,6 +680,129 @@ class SaleCompletionTestCase(TransactionTestCase):
         self.assertEqual(sale.status, 'DRAFT')
         self.assertEqual(sale.amount_paid, Decimal('0.00'))
         self.assertEqual(self.batch.quantity, initial_quantity)
+
+    def test_zero_paid_sale_is_pending_and_inconsistent_status_is_rejected(self):
+        sale = Sale.objects.create(
+            pharmacy=self.pharmacy,
+            receipt_number=generate_receipt_number(self.pharmacy.id),
+            status='DRAFT',
+            created_by=self.owner,
+        )
+        SaleItem.objects.create(
+            sale=sale,
+            inventory_item=self.inventory,
+            quantity=1,
+            unit_price=Decimal('100.00'),
+            line_total=Decimal('100.00'),
+        )
+
+        with self.assertRaisesRegex(ValueError, 'payment_status must be PENDING'):
+            SaleCompletionService.complete_sale(
+                sale,
+                self.owner,
+                payment_status='PARTIAL',
+                amount_paid=Decimal('0.00'),
+            )
+
+        sale.refresh_from_db()
+        self.assertEqual(sale.status, 'DRAFT')
+        self.assertEqual(sale.payment_status, 'PENDING')
+
+    def test_negative_amount_paid_is_rejected(self):
+        sale = Sale.objects.create(
+            pharmacy=self.pharmacy,
+            receipt_number=generate_receipt_number(self.pharmacy.id),
+            status='DRAFT',
+            created_by=self.owner,
+        )
+        SaleItem.objects.create(
+            sale=sale,
+            inventory_item=self.inventory,
+            quantity=1,
+            unit_price=Decimal('100.00'),
+            line_total=Decimal('100.00'),
+        )
+
+        with self.assertRaisesRegex(ValueError, 'between zero and the sale total'):
+            SaleCompletionService.complete_sale(
+                sale,
+                self.owner,
+                amount_paid=Decimal('-0.01'),
+            )
+
+        sale.refresh_from_db()
+        self.assertEqual(sale.status, 'DRAFT')
+        self.assertEqual(sale.amount_paid, Decimal('0.00'))
+
+    def test_repeated_completion_does_not_duplicate_debt_or_stock_movements(self):
+        customer = Customer.objects.create(
+            pharmacy=self.pharmacy,
+            first_name='Repeat',
+            customer_type='REGISTERED',
+        )
+        sale = Sale.objects.create(
+            pharmacy=self.pharmacy,
+            customer=customer,
+            receipt_number=generate_receipt_number(self.pharmacy.id),
+            status='DRAFT',
+            payment_method='DEBT',
+            created_by=self.owner,
+        )
+        SaleItem.objects.create(
+            sale=sale,
+            inventory_item=self.inventory,
+            quantity=1,
+            unit_price=Decimal('100.00'),
+            line_total=Decimal('100.00'),
+        )
+        initial_quantity = self.batch.quantity
+
+        SaleCompletionService.complete_sale(sale, self.owner)
+        with self.assertRaisesRegex(ValueError, 'not DRAFT'):
+            SaleCompletionService.complete_sale(sale, self.owner)
+
+        self.batch.refresh_from_db()
+        sale.refresh_from_db()
+        self.assertEqual(self.batch.quantity, initial_quantity - 1)
+        self.assertEqual(sale.payment_status, 'PENDING')
+        self.assertEqual(customer.outstanding_balance, Decimal('100.00'))
+        self.assertEqual(sale.ledger_entries.filter(entry_type='CREDIT_SALE').count(), 1)
+        self.assertEqual(StockMovement.objects.filter(sale=sale, movement_type='SALE').count(), 1)
+
+    def test_inventory_failure_rolls_back_sale_stock_and_debt(self):
+        customer = Customer.objects.create(
+            pharmacy=self.pharmacy,
+            first_name='Rollback',
+            customer_type='REGISTERED',
+        )
+        sale = Sale.objects.create(
+            pharmacy=self.pharmacy,
+            customer=customer,
+            receipt_number=generate_receipt_number(self.pharmacy.id),
+            status='DRAFT',
+            payment_method='DEBT',
+            created_by=self.owner,
+        )
+        for quantity in (80, 40):
+            SaleItem.objects.create(
+                sale=sale,
+                inventory_item=self.inventory,
+                quantity=quantity,
+                unit_price=Decimal('100.00'),
+                line_total=Decimal(quantity * 100),
+            )
+        initial_quantity = self.batch.quantity
+
+        with self.assertRaisesRegex(ValueError, 'Insufficient stock'):
+            SaleCompletionService.complete_sale(sale, self.owner)
+
+        sale.refresh_from_db()
+        self.batch.refresh_from_db()
+        self.assertEqual(sale.status, 'DRAFT')
+        self.assertEqual(self.batch.quantity, initial_quantity)
+        self.assertEqual(StockMovement.objects.filter(sale=sale).count(), 0)
+        self.assertEqual(sale.ledger_entries.filter(entry_type='CREDIT_SALE').count(), 0)
+        self.assertEqual(customer.outstanding_balance, Decimal('0.00'))
 
     def test_completing_sale_creates_stock_movement(self):
         """Test 10: Completing a sale creates SALE StockMovement"""

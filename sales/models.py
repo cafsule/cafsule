@@ -513,6 +513,15 @@ class Sale(models.Model):
             return Decimal('0.00')
         return remaining
 
+    @staticmethod
+    def payment_status_for_amounts(total, amount_paid):
+        """Derive payment status from the sale total and amount received."""
+        if amount_paid <= Decimal('0.00'):
+            return 'PENDING'
+        if amount_paid >= total:
+            return 'PAID'
+        return 'PARTIAL'
+
     @property
     def is_credit_sale(self):
         """Whether this sale is not fully settled yet."""
@@ -580,9 +589,10 @@ class Sale(models.Model):
 
         if new_amount_paid >= self.total:
             self.amount_paid = self.total
-            self.payment_status = 'PAID'
-        else:
-            self.payment_status = 'PARTIAL' if new_amount_paid > Decimal('0.00') else 'PENDING'
+        self.payment_status = self.payment_status_for_amounts(
+            self.total,
+            self.amount_paid,
+        )
 
         self.save(update_fields=['amount_paid', 'payment_status', 'updated_at'])
         return amount
@@ -600,15 +610,10 @@ class Sale(models.Model):
 
         self.validate_debt_sale()
 
-        if self.payment_method == 'DEBT' and self.customer_id:
-            self.payment_status = 'PARTIAL' if self.amount_paid < self.total else 'PAID'
-            if self.amount_paid <= Decimal('0.00'):
-                self.amount_paid = Decimal('0.00')
-
         self.status = 'COMPLETED'
         self.completed_at = timezone.now()
         self.sold_by = user
-        self.save(update_fields=['status', 'completed_at', 'sold_by', 'payment_status', 'amount_paid', 'updated_at'])
+        self.save(update_fields=['status', 'completed_at', 'sold_by', 'updated_at'])
 
         if self.payment_method == 'DEBT' and self.customer_id:
             balance_delta = self.total - self.amount_paid

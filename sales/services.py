@@ -164,8 +164,17 @@ class SaleCompletionService:
         Returns:
             sale: Updated sale instance
         """
+        # Serialize concurrent completion attempts for the same sale.
+        sale = Sale.objects.select_for_update().get(pk=sale.pk)
+
         # Validate sale can be completed
         SaleCompletionService.validate_sale_completable(sale)
+        sale.validate_debt_sale()
+        if sale.payment_method == 'DEBT' and sale.customer_id:
+            sale.customer = Customer.objects.select_for_update().get(
+                pk=sale.customer_id,
+                pharmacy_id=sale.pharmacy_id,
+            )
         
         # Validate all sale items and derive totals from their persisted,
         # server-priced quantity and unit price. Never trust cached line_total.
@@ -199,13 +208,15 @@ class SaleCompletionService:
         if sale.amount_paid < Decimal('0.00') or sale.amount_paid > total:
             raise ValueError('Amount paid must be between zero and the sale total.')
 
-        derived_payment_status = (
-            'PAID' if sale.amount_paid == total else
-            'PARTIAL' if sale.amount_paid > Decimal('0.00') else
-            'PENDING'
+        derived_payment_status = Sale.payment_status_for_amounts(
+            total,
+            sale.amount_paid,
         )
         if payment_status and payment_status != derived_payment_status:
-            raise ValueError('Payment status does not match the amount paid.')
+            raise ValueError(
+                f'payment_status must be {derived_payment_status} when '
+                f'amount_paid is {sale.amount_paid} of total {total}.'
+            )
         sale.payment_status = derived_payment_status
         sale.subtotal = subtotal
         sale.total = total
