@@ -1,6 +1,8 @@
 from django.contrib import admin
 from django.utils import timezone
 
+from main.email_utils import EMAIL_DELIVERY_EXCEPTIONS, email_failure_category
+
 from .models import Feedback
 from .services import send_feedback_notification
 
@@ -10,8 +12,8 @@ def retry_feedback_email(modeladmin, request, queryset):
     for feedback in queryset.filter(email_sent=False):
         try:
             send_feedback_notification(feedback)
-        except Exception as exc:
-            feedback.email_error = str(exc)[:500]
+        except EMAIL_DELIVERY_EXCEPTIONS as exc:
+            feedback.email_error = email_failure_category(exc)
             feedback.save(update_fields=('email_error',))
         else:
             feedback.email_sent = True

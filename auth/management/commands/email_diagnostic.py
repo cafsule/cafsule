@@ -1,30 +1,51 @@
 import smtplib
-import ssl
 
 from django.conf import settings
 from django.core.mail import EmailMessage, get_connection
 from django.core.management.base import BaseCommand, CommandError
 
+from main.email_utils import email_failure_category
+
 
 class Command(BaseCommand):
-    help = "Submit a harmless diagnostic email through the configured SMTP backend."
+    help = "Check configured SMTP connectivity, optionally sending one diagnostic email."
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "--recipient", required=True, help="Test mailbox address controlled by the operator."
+            "--recipient",
+            help="Optional test mailbox address controlled by the operator.",
         )
 
     def handle(self, *args, **options):
+        self.stdout.write(f"Email backend: {settings.EMAIL_BACKEND}")
+        self.stdout.write(f"SMTP host: {settings.EMAIL_HOST}")
+        self.stdout.write(f"SMTP port: {settings.EMAIL_PORT}")
+        self.stdout.write(f"TLS enabled: {settings.EMAIL_USE_TLS}")
+        self.stdout.write(f"SSL enabled: {settings.EMAIL_USE_SSL}")
+
         if settings.EMAIL_BACKEND != "django.core.mail.backends.smtp.EmailBackend":
             raise CommandError("EMAIL_BACKEND is not Django SMTP EmailBackend.")
+        if settings.EMAIL_USE_TLS and settings.EMAIL_USE_SSL:
+            raise CommandError("SMTP configuration cannot enable TLS and SSL together.")
 
-        connection = get_connection(fail_silently=False)
+        connection = get_connection(
+            fail_silently=False,
+            timeout=settings.EMAIL_TIMEOUT,
+        )
         try:
             try:
                 connection.open()
             except Exception as exc:
-                self._report_failure("connection/authentication/TLS", exc)
-                raise CommandError("SMTP connection setup failed.") from exc
+                self._report_failure("SMTP connection/authentication", exc)
+                raise CommandError(
+                    f"SMTP setup failed: {email_failure_category(exc)}."
+                ) from None
+
+            self.stdout.write(self.style.SUCCESS(
+                "SMTP connection and authentication succeeded."
+            ))
+            if not options["recipient"]:
+                return
 
             message = EmailMessage(
                 subject="Cafsule SMTP delivery diagnostic",
@@ -36,8 +57,10 @@ class Command(BaseCommand):
             try:
                 sent = message.send(fail_silently=False)
             except Exception as exc:
-                self._report_failure("message submission/sender/recipient", exc)
-                raise CommandError("SMTP message submission failed.") from exc
+                self._report_failure("SMTP message submission", exc)
+                raise CommandError(
+                    f"SMTP submission failed: {email_failure_category(exc)}."
+                ) from None
 
             if sent != 1:
                 raise CommandError("SMTP backend did not submit the diagnostic message.")
@@ -48,15 +71,6 @@ class Command(BaseCommand):
             connection.close()
 
     def _report_failure(self, stage, exc):
-        message = str(exc)
-        if settings.EMAIL_HOST_PASSWORD:
-            message = message.replace(settings.EMAIL_HOST_PASSWORD, "[REDACTED]")
-        if isinstance(exc, smtplib.SMTPAuthenticationError):
-            stage = "SMTP authentication"
-        elif isinstance(exc, smtplib.SMTPSenderRefused):
-            stage = "sender rejection"
-        elif isinstance(exc, (ssl.SSLError, smtplib.SMTPNotSupportedError)):
-            stage = "TLS negotiation"
-        elif isinstance(exc, (smtplib.SMTPConnectError, OSError, TimeoutError)):
-            stage = "SMTP connection"
-        self.stderr.write(f"{stage} failed ({type(exc).__name__}): {message}")
+        self.stderr.write(
+            f"{stage} failed ({type(exc).__name__}): {email_failure_category(exc)}."
+        )

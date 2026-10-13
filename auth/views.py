@@ -6,7 +6,6 @@ from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
 from rest_framework_simplejwt.views import TokenRefreshView as JWTTokenRefreshView
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
-from django.core.mail import send_mail
 from django.conf import settings
 from django.urls import reverse
 from django.contrib.auth import get_user_model
@@ -594,17 +593,17 @@ class ResendVerificationView(APIView):
             # Create new token
             token = generate_email_verification_token(user)
             
-            # Send verification email
+            # Keep the response generic so email presence isn't exposed.
             send_verification_email(user.id, token.token)
 
             return Response({
-                'message': 'Verification email sent'
+                'message': 'If an account exists with this email, check your inbox for verification instructions.'
             }, status=status.HTTP_200_OK)
             
         except User.DoesNotExist:
             # Don't reveal if email exists
             return Response({
-                'message': 'If an account exists with this email, a verification link will be sent'
+                'message': 'If an account exists with this email, check your inbox for verification instructions.'
             }, status=status.HTTP_200_OK)
 
 class PasswordResetRequestView(APIView):
@@ -742,7 +741,7 @@ class OTPRequestView(APIView):
             )
             
             return Response({
-                'message': f'OTP sent to your {send_via.lower()}',
+                'message': f'OTP delivery requested to your {send_via.lower()}',
                 'expires_in': 10,  # minutes
                 'method': send_via
             }, status=status.HTTP_200_OK)

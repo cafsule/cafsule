@@ -1,3 +1,6 @@
+import smtplib
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.test import TestCase, override_settings
@@ -62,6 +65,22 @@ class FeedbackSubmissionTests(TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertFalse(Feedback.objects.get().email_sent)
+
+    @patch(
+        'feedback.services.send_mail',
+        side_effect=smtplib.SMTPAuthenticationError(535, b'private credential details'),
+    )
+    def test_smtp_error_is_sanitized_in_feedback_state(self, mock_send_mail):
+        request = APIRequestFactory().post('/api/feedback/', self.payload, format='json')
+        force_authenticate(request, user=self.user)
+        response = FeedbackCreateView.as_view()(request)
+
+        feedback = Feedback.objects.get()
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(feedback.email_sent)
+        self.assertEqual(feedback.email_error, 'SMTP authentication failed')
+        self.assertNotIn('private credential details', feedback.email_error)
+        mock_send_mail.assert_called_once()
 
     def test_feedback_requires_authentication(self):
         self.client.force_authenticate(user=None)

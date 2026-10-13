@@ -341,10 +341,15 @@ EMAIL_HOST = os.getenv('EMAIL_HOST', 'localhost')
 EMAIL_PORT = int(os.getenv('EMAIL_PORT', 25))
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
-EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'False').lower() == 'true'
-EMAIL_USE_SSL = os.getenv('EMAIL_USE_SSL', 'False').lower() == 'true'
+EMAIL_USE_TLS = _get_bool_env('EMAIL_USE_TLS', 'False')
+EMAIL_USE_SSL = _get_bool_env('EMAIL_USE_SSL', 'False')
+EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '15'))
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@pharmacy-ims.com')
 FEEDBACK_RECIPIENT_EMAIL = os.getenv('FEEDBACK_RECIPIENT_EMAIL', 'codemaniac13@gmail.com')
+if EMAIL_USE_TLS and EMAIL_USE_SSL:
+    raise ImproperlyConfigured('Set only one of EMAIL_USE_TLS and EMAIL_USE_SSL.')
+if EMAIL_TIMEOUT <= 0:
+    raise ImproperlyConfigured('EMAIL_TIMEOUT must be a positive number of seconds.')
 if not DEBUG:
     required_email_settings = {
         'EMAIL_HOST': os.getenv('EMAIL_HOST', '').strip(),
@@ -361,8 +366,6 @@ if not DEBUG:
         raise ImproperlyConfigured(
             'Production email configuration must provide: ' + ', '.join(missing_email_settings) + '.'
         )
-    if EMAIL_USE_TLS and EMAIL_USE_SSL:
-        raise ImproperlyConfigured('Set only one of EMAIL_USE_TLS and EMAIL_USE_SSL in production.')
 
 # OAuth Configuration
 

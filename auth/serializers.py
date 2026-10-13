@@ -9,6 +9,16 @@ from django.db import transaction
 from .models import User, EmailVerificationToken, PasswordResetToken
 import re
 
+
+class EmailDeliveryUnavailable(APIException):
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    default_detail = (
+        'Registration could not be completed because verification email delivery failed. '
+        'Please try again later.'
+    )
+    default_code = 'email_delivery_unavailable'
+
+
 # Import PharmacyBrand at module level for validation
 try:
     from pharmacy.models import PharmacyBrand, PharmacyMembership
@@ -152,7 +162,8 @@ class RegisterSerializer(serializers.ModelSerializer):
         from .tasks import send_otp_email
         from .tokens import generate_otp
         otp = generate_otp(user, 'EMAIL_VERIFICATION')
-        send_otp_email(user.id, otp.otp_code, 'EMAIL_VERIFICATION')
+        if not send_otp_email(user.id, otp.otp_code, 'EMAIL_VERIFICATION'):
+            raise EmailDeliveryUnavailable()
 
         return user
 
