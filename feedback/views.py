@@ -4,7 +4,11 @@ from django.utils import timezone
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 
-from main.email_utils import EMAIL_DELIVERY_EXCEPTIONS, email_failure_category
+from main.email_utils import (
+    EMAIL_DELIVERY_EXCEPTIONS,
+    email_failure_category,
+    email_failure_exception_types,
+)
 
 from .serializers import FeedbackSerializer
 from .services import send_feedback_notification
@@ -26,8 +30,9 @@ class FeedbackCreateView(generics.CreateAPIView):
         except EMAIL_DELIVERY_EXCEPTIONS as exc:
             failure = email_failure_category(exc)
             logger.error(
-                'Feedback email delivery failed for feedback id=%s: %s',
+                'Feedback email delivery failed for feedback id=%s exceptions=%s category=%s',
                 feedback.pk,
+                email_failure_exception_types(exc),
                 failure,
             )
             feedback.email_error = failure

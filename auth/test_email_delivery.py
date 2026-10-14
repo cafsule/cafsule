@@ -11,7 +11,7 @@ from django.core.management import CommandError, call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 
-from main.email_utils import email_failure_category
+from main.email_utils import email_failure_category, email_failure_exception_types
 
 from .models import OTPVerification, User
 from .serializers import EmailDeliveryUnavailable, RegisterSerializer
@@ -32,6 +32,10 @@ class EmailDeliveryConfigurationTests(SimpleTestCase):
             (socket.gaierror('private hostname detail'), 'SMTP hostname lookup failed'),
             (TimeoutError('private timeout detail'), 'SMTP connection timed out'),
             (
+                ConnectionRefusedError('private connection detail'),
+                'SMTP connection was refused',
+            ),
+            (
                 smtplib.SMTPAuthenticationError(535, b'private credential detail'),
                 'SMTP authentication failed',
             ),
@@ -47,6 +51,16 @@ class EmailDeliveryConfigurationTests(SimpleTestCase):
                 self.assertEqual(email_failure_category(error), expected_category)
                 self.assertNotIn(str(error), expected_category)
 
+    def test_wrapped_socket_failure_reports_safe_root_cause(self):
+        error = smtplib.SMTPServerDisconnected('private SMTP detail')
+        error.__cause__ = ConnectionRefusedError('private socket detail')
+
+        self.assertEqual(email_failure_category(error), 'SMTP connection was refused')
+        self.assertEqual(
+            email_failure_exception_types(error),
+            'SMTPServerDisconnected -> ConnectionRefusedError',
+        )
+
 
 @override_settings(
     EMAIL_BACKEND='django.core.mail.backends.smtp.EmailBackend',
@@ -60,27 +74,49 @@ class EmailDeliveryConfigurationTests(SimpleTestCase):
     DEFAULT_FROM_EMAIL='sender@example.com',
 )
 class EmailDiagnosticCommandTests(SimpleTestCase):
+    @patch('auth.management.commands.email_diagnostic.socket.create_connection')
+    @patch('auth.management.commands.email_diagnostic.socket.getaddrinfo')
     @patch('auth.management.commands.email_diagnostic.get_connection')
-    def test_connects_and_authenticates_without_sending_a_message(self, get_connection_mock):
+    def test_probes_dns_and_tcp_then_authenticates_without_sending(
+        self,
+        get_connection_mock,
+        getaddrinfo_mock,
+        create_connection_mock,
+    ):
         connection = Mock()
         get_connection_mock.return_value = connection
         stdout = io.StringIO()
 
         call_command('email_diagnostic', stdout=stdout)
 
+        getaddrinfo_mock.assert_called_once_with(
+            'smtp.gmail.com',
+            587,
+            type=socket.SOCK_STREAM,
+        )
+        create_connection_mock.assert_called_once_with(
+            ('smtp.gmail.com', 587),
+            timeout=11,
+        )
         get_connection_mock.assert_called_once_with(fail_silently=False, timeout=11)
         connection.open.assert_called_once()
         connection.send_messages.assert_not_called()
+        self.assertIn('DNS resolution succeeded', stdout.getvalue())
+        self.assertIn('TCP connectivity succeeded', stdout.getvalue())
         self.assertIn('django.core.mail.backends.smtp.EmailBackend', stdout.getvalue())
         self.assertIn('SMTP host: smtp.gmail.com', stdout.getvalue())
         self.assertIn('SMTP port: 587', stdout.getvalue())
         self.assertIn('TLS enabled: True', stdout.getvalue())
         self.assertIn('SSL enabled: False', stdout.getvalue())
 
+    @patch('auth.management.commands.email_diagnostic.socket.create_connection')
+    @patch('auth.management.commands.email_diagnostic.socket.getaddrinfo')
     @patch('auth.management.commands.email_diagnostic.get_connection')
     def test_authentication_error_is_classified_without_leaking_error_text(
         self,
         get_connection_mock,
+        getaddrinfo_mock,
+        create_connection_mock,
     ):
         connection = Mock()
         connection.open.side_effect = smtplib.SMTPAuthenticationError(
@@ -91,14 +127,83 @@ class EmailDiagnosticCommandTests(SimpleTestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        with self.assertRaises(CommandError):
+        with self.assertRaises(CommandError) as raised:
             call_command('email_diagnostic', stdout=stdout, stderr=stderr)
 
-        self.assertIn('SMTP authentication failed', stderr.getvalue())
+        self.assertIn(
+            'SMTP STARTTLS/authentication failed: SMTP authentication failed',
+            str(raised.exception),
+        )
+        self.assertIn('SMTPAuthenticationError', stderr.getvalue())
         self.assertNotIn('private-test-app-password', stdout.getvalue() + stderr.getvalue())
 
+    @patch('auth.management.commands.email_diagnostic.socket.getaddrinfo')
     @patch('auth.management.commands.email_diagnostic.get_connection')
-    def test_test_email_is_sent_only_when_recipient_is_explicit(self, get_connection_mock):
+    def test_dns_failure_is_reported_without_attempting_tcp(
+        self,
+        get_connection_mock,
+        getaddrinfo_mock,
+    ):
+        getaddrinfo_mock.side_effect = socket.gaierror('private DNS detail')
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with self.assertRaises(CommandError) as raised:
+            call_command('email_diagnostic', stdout=stdout, stderr=stderr)
+
+        self.assertIn(
+            'DNS resolution failed: SMTP hostname lookup failed',
+            str(raised.exception),
+        )
+        get_connection_mock.assert_not_called()
+        self.assertNotIn('private DNS detail', stdout.getvalue() + stderr.getvalue())
+
+    @patch('auth.management.commands.email_diagnostic.socket.create_connection')
+    @patch('auth.management.commands.email_diagnostic.socket.getaddrinfo')
+    @patch('auth.management.commands.email_diagnostic.get_connection')
+    def test_tcp_refusal_is_classified_and_stops_before_smtp(
+        self,
+        get_connection_mock,
+        getaddrinfo_mock,
+        create_connection_mock,
+    ):
+        create_connection_mock.side_effect = ConnectionRefusedError('private socket detail')
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with self.assertRaises(CommandError) as raised:
+            call_command('email_diagnostic', stdout=stdout, stderr=stderr)
+
+        self.assertIn('TCP connectivity failed: SMTP connection was refused', str(raised.exception))
+        self.assertIn('ConnectionRefusedError', stderr.getvalue())
+        self.assertNotIn('private socket detail', stdout.getvalue() + stderr.getvalue())
+        get_connection_mock.assert_not_called()
+
+    @override_settings(EMAIL_USE_TLS=False)
+    @patch('auth.management.commands.email_diagnostic.socket.create_connection')
+    @patch('auth.management.commands.email_diagnostic.socket.getaddrinfo')
+    @patch('auth.management.commands.email_diagnostic.get_connection')
+    def test_gmail_submission_port_requires_starttls(
+        self,
+        get_connection_mock,
+        getaddrinfo_mock,
+        create_connection_mock,
+    ):
+        with self.assertRaises(CommandError) as raised:
+            call_command('email_diagnostic', stdout=io.StringIO())
+
+        self.assertIn('requires EMAIL_USE_TLS=True', str(raised.exception))
+        get_connection_mock.assert_not_called()
+
+    @patch('auth.management.commands.email_diagnostic.socket.create_connection')
+    @patch('auth.management.commands.email_diagnostic.socket.getaddrinfo')
+    @patch('auth.management.commands.email_diagnostic.get_connection')
+    def test_test_email_is_sent_only_when_recipient_is_explicit(
+        self,
+        get_connection_mock,
+        getaddrinfo_mock,
+        create_connection_mock,
+    ):
         connection = Mock()
         connection.send_messages.return_value = 1
         get_connection_mock.return_value = connection

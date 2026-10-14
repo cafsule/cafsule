@@ -1,10 +1,15 @@
 import smtplib
+import socket
 
 from django.conf import settings
 from django.core.mail import EmailMessage, get_connection
 from django.core.management.base import BaseCommand, CommandError
 
-from main.email_utils import email_failure_category
+from main.email_utils import (
+    SMTP_DELIVERY_EXCEPTIONS,
+    email_failure_category,
+    email_failure_exception_types,
+)
 
 
 class Command(BaseCommand):
@@ -28,6 +33,41 @@ class Command(BaseCommand):
         if settings.EMAIL_USE_TLS and settings.EMAIL_USE_SSL:
             raise CommandError("SMTP configuration cannot enable TLS and SSL together.")
 
+        try:
+            socket.getaddrinfo(
+                settings.EMAIL_HOST,
+                settings.EMAIL_PORT,
+                type=socket.SOCK_STREAM,
+            )
+        except (OSError, TimeoutError) as exc:
+            self._report_failure("DNS resolution", exc)
+            raise CommandError(
+                f"DNS resolution failed: {email_failure_category(exc)}."
+            ) from None
+        self.stdout.write(self.style.SUCCESS("DNS resolution succeeded."))
+
+        try:
+            with socket.create_connection(
+                (settings.EMAIL_HOST, settings.EMAIL_PORT),
+                timeout=settings.EMAIL_TIMEOUT,
+            ):
+                pass
+        except (OSError, TimeoutError) as exc:
+            self._report_failure("TCP connectivity", exc)
+            raise CommandError(
+                f"TCP connectivity failed: {email_failure_category(exc)}."
+            ) from None
+        self.stdout.write(self.style.SUCCESS("TCP connectivity succeeded."))
+
+        if (
+            settings.EMAIL_HOST.lower() == "smtp.gmail.com"
+            and settings.EMAIL_PORT == 587
+            and not settings.EMAIL_USE_TLS
+        ):
+            raise CommandError(
+                "smtp.gmail.com:587 requires EMAIL_USE_TLS=True to use STARTTLS."
+            )
+
         connection = get_connection(
             fail_silently=False,
             timeout=settings.EMAIL_TIMEOUT,
@@ -35,15 +75,21 @@ class Command(BaseCommand):
         try:
             try:
                 connection.open()
-            except Exception as exc:
-                self._report_failure("SMTP connection/authentication", exc)
+            except SMTP_DELIVERY_EXCEPTIONS as exc:
+                self._report_failure("SMTP STARTTLS/authentication", exc)
                 raise CommandError(
-                    f"SMTP setup failed: {email_failure_category(exc)}."
+                    f"SMTP STARTTLS/authentication failed: {email_failure_category(exc)}."
                 ) from None
 
-            self.stdout.write(self.style.SUCCESS(
-                "SMTP connection and authentication succeeded."
-            ))
+            if settings.EMAIL_HOST_USER:
+                self.stdout.write(self.style.SUCCESS(
+                    "SMTP connection, configured TLS, and authentication succeeded."
+                ))
+            else:
+                self.stdout.write(self.style.WARNING(
+                    "SMTP connection and configured TLS succeeded; authentication was skipped "
+                    "because EMAIL_HOST_USER is not configured."
+                ))
             if not options["recipient"]:
                 return
 
@@ -56,7 +102,7 @@ class Command(BaseCommand):
             )
             try:
                 sent = message.send(fail_silently=False)
-            except Exception as exc:
+            except SMTP_DELIVERY_EXCEPTIONS as exc:
                 self._report_failure("SMTP message submission", exc)
                 raise CommandError(
                     f"SMTP submission failed: {email_failure_category(exc)}."
@@ -72,5 +118,6 @@ class Command(BaseCommand):
 
     def _report_failure(self, stage, exc):
         self.stderr.write(
-            f"{stage} failed ({type(exc).__name__}): {email_failure_category(exc)}."
+            f"{stage} failed ({email_failure_exception_types(exc)}): "
+            f"{email_failure_category(exc)}."
         )

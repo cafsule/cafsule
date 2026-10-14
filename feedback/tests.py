@@ -73,13 +73,17 @@ class FeedbackSubmissionTests(TestCase):
     def test_smtp_error_is_sanitized_in_feedback_state(self, mock_send_mail):
         request = APIRequestFactory().post('/api/feedback/', self.payload, format='json')
         force_authenticate(request, user=self.user)
-        response = FeedbackCreateView.as_view()(request)
+        with self.assertLogs('feedback.views', level='ERROR') as captured_logs:
+            response = FeedbackCreateView.as_view()(request)
 
         feedback = Feedback.objects.get()
         self.assertEqual(response.status_code, 503)
         self.assertFalse(feedback.email_sent)
         self.assertEqual(feedback.email_error, 'SMTP authentication failed')
         self.assertNotIn('private credential details', feedback.email_error)
+        self.assertIn('exceptions=SMTPAuthenticationError', captured_logs.output[0])
+        self.assertIn('category=SMTP authentication failed', captured_logs.output[0])
+        self.assertNotIn('private credential details', captured_logs.output[0])
         mock_send_mail.assert_called_once()
 
     def test_feedback_requires_authentication(self):

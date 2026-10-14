@@ -25,10 +25,13 @@ View task execution with `docker compose logs -f celery`.
 
 ## Safe SMTP delivery diagnostic
 
-The command below requires an explicit test mailbox, sends one harmless message from the configured sender, and reports connection, authentication, TLS, sender rejection, or submission failures without printing the SMTP password:
+The command first checks DNS and TCP connectivity to the configured SMTP host/port (using the bounded `EMAIL_TIMEOUT`), then opens Django's SMTP connection (including configured STARTTLS/SSL and authentication). Gmail on port 587 requires `EMAIL_USE_TLS=True`. Without `--recipient`, it sends no email. With an explicit test mailbox, it sends one harmless message. Failures report exception class names and a safe category only; SMTP responses, credentials, and environment values are not logged.
 
 ```sh
+.venv/bin/python manage.py email_diagnostic
 .venv/bin/python manage.py email_diagnostic --recipient you-control@example.com
 ```
 
 A success means the SMTP server accepted the message for submission; it cannot guarantee inbox placement. Gmail must have the custom `DEFAULT_FROM_EMAIL` configured as a permitted send-as alias if the authenticated Gmail account differs. That alias is an external Gmail/domain setting.
+
+To test Railway's network path, use an authenticated Railway shell/SSH session for the backend service and run `python manage.py email_diagnostic` there. Do not use `railway run` from a local workstation to infer Railway connectivity: that runs the command locally. Do not expose a public diagnostic endpoint. If the one-off check succeeds locally but DNS or TCP fails in Railway, SMTP egress is blocked or unavailable from that runtime; use an HTTPS/API-based transactional email provider rather than changing Gunicorn timeouts or repeatedly altering Gmail settings.
